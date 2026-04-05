@@ -5,6 +5,9 @@ making them reusable from both scripts and the GUI.
 """
 
 import numpy as np
+from pathlib import Path
+import matplotlib.pyplot as plt
+from parser import parse_real_observables, parse_wavefunction
 
 
 def plot_energy_vs_time(ax, data, phase="real"):
@@ -21,19 +24,16 @@ def plot_energy_vs_time(ax, data, phase="real"):
         return
 
     if phase == "imag":
-        x = data.get("step", np.array([]))
+        x = data.get("time", np.array([]))
         xlabel = "Imaginary time step"
     else:
         x = data.get("time", np.array([]))
         xlabel = "Time (a.u.)"
 
     e_real = data.get("energy_real", np.array([]))
-    e_imag = data.get("energy_imag", np.array([]))
 
     if len(x) > 0 and len(e_real) > 0:
         ax.plot(x, e_real, "b-", linewidth=0.8, label="Re(E)")
-    if len(x) > 0 and len(e_imag) > 0:
-        ax.plot(x, e_imag, "r--", linewidth=0.8, alpha=0.7, label="Im(E)")
 
     ax.set_xlabel(xlabel)
     ax.set_ylabel("Energy (a.u.)")
@@ -331,3 +331,59 @@ def plot_norm(ax, data, phase="real"):
     ax.set_ylabel("Norm")
     ax.set_title("Wavefunction Norm")
     ax.grid(True, alpha=0.3)
+
+
+def load_config(filepath):
+    """Parse the simulation.cfg file into a dictionary."""
+    conf = {}
+    with open(filepath, 'r') as f:
+        for line in f:
+            line = line.strip()
+            if not line or line.startswith('#'):
+                continue
+            key, val = line.split('=')
+            conf[key.strip()] = val.strip()
+    return conf
+
+
+
+if __name__ == "__main__":
+    # Path logic
+    workdir = Path(__file__).resolve().parents[2] / 'res'
+    cfg_path = workdir / "simulation.cfg"
+
+    if cfg_path.exists():
+        config = load_config(cfg_path)
+
+        # Fix: Access dictionary via keys and convert types
+        nx = int(config['grid_nx'])
+        ny = int(config['grid_ny'])
+        dx = float(config['grid_dx'])
+        dy = float(config['grid_dy'])
+        
+        # Load data using filenames from config
+        obs_data = parse_real_observables(workdir / config['obser_file'])
+        imag_data = parse_real_observables(workdir / config['obser_imag_file'])
+        wf_data = parse_wavefunction(workdir / config['wf_file'], nx, ny)
+
+        # Plot
+        fig, (ax1, ax2, ax3) = plt.subplots(1, 3, figsize=(20, 6))
+        
+        if imag_data:
+            plot_energy_vs_time(ax1, imag_data, phase="imag")
+        
+
+        if obs_data:
+            plot_energy_vs_time(ax2, obs_data, phase="real")
+        
+        if wf_data is not None:
+            plot_wavefunction_2d(ax3, wf_data, dx, dy, nx, ny)
+
+        plt.tight_layout()
+        
+        # Save the file to the res folder
+        save_path = workdir / "simulation_plot.png"
+        plt.savefig(save_path)
+        print(f"Plot saved to {save_path}")
+        
+        plt.show()

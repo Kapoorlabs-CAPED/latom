@@ -21,15 +21,15 @@ class SimulationConfig:
 
     # Imaginary time propagation (ground state)
     imag_dt: float = 0.25
-    imag_steps: int = 1000
+    imag_steps: int = 100
 
     # Real time propagation (laser dynamics)
     real_dt: float = 0.1
-    real_steps: int = 20000
+    real_steps: int = 2000
 
     # Output control
     obs_every: int = 1
-    wf_every: int = 20000
+    wf_every: int = real_steps/ 10
 
     # Physics parameters
     ionization_box: int = 50
@@ -38,9 +38,9 @@ class SimulationConfig:
     absorb_ampl: float = 50.0
 
     # Laser parameters (velocity gauge)
-    laser_freq: float = 1.556
+    laser_freq: float = 1.556 
     laser_alpha: float = 0.1
-    laser_cycles: float = 400.0
+    laser_cycles: float = 40.0
 
     # Output file names
     output_dir: str = "res"
