@@ -5,6 +5,7 @@ making them reusable from both scripts and the GUI.
 """
 
 from parser import (
+    collect_wf_to_hdf5,
     find_wf_snapshots,
     parse_imag_observables,
     parse_real_observables,
@@ -31,13 +32,17 @@ def plot_energy_vs_time(ax, data, phase="real"):
         return
 
     if phase == "imag":
-        x = data.get("time", np.array([]))
+        x = (
+            data["step"].values
+            if "step" in data.columns
+            else np.arange(len(data))
+        )
         xlabel = "Imaginary time step"
     else:
-        x = data.get("time", np.array([]))
+        x = data["time"].values
         xlabel = "Time (a.u.)"
 
-    e_real = data.get("energy_real", np.array([]))
+    e_real = data["energy_real"].values
 
     if len(x) > 0 and len(e_real) > 0:
         ax.plot(x, e_real, "b-", linewidth=0.8, label="Re(E)")
@@ -158,8 +163,8 @@ def plot_ionization(ax, data):
         ax.set_title("No data")
         return
 
-    t = data.get("time", np.array([]))
-    pop = data.get("ground_pop", np.array([]))
+    t = data["time"].values
+    pop = data["ground_pop"].values
 
     if len(t) > 0 and len(pop) > 0:
         ax.plot(
@@ -198,9 +203,9 @@ def plot_dipole(ax, data):
         ax.set_title("No data")
         return
 
-    t = data.get("time", np.array([]))
-    ex = data.get("expect_x", np.array([]))
-    ey = data.get("expect_y", np.array([]))
+    t = data["time"].values
+    ex = data["expect_x"].values
+    ey = data["expect_y"].values
 
     if len(t) > 0 and len(ex) > 0:
         ax.plot(
@@ -240,8 +245,8 @@ def plot_vector_potential(ax, data):
         ax.set_title("No data")
         return
 
-    t = data.get("time", np.array([]))
-    vp = data.get("vecpot_x", np.array([]))
+    t = data["time"].values
+    vp = data["vecpot_x"].values
 
     if len(t) > 0 and len(vp) > 0:
         ax.plot(t, vp, "g-", linewidth=0.8)
@@ -268,8 +273,8 @@ def plot_spectrum(ax, data, dt=None):
         ax.set_title("No data")
         return
 
-    t = data.get("time", np.array([]))
-    ex = data.get("expect_x", np.array([]))
+    t = data["time"].values
+    ex = data["expect_x"].values
 
     if len(t) < 10 or len(ex) < 10:
         ax.set_title("Insufficient data for spectrum")
@@ -323,13 +328,17 @@ def plot_norm(ax, data, phase="real"):
         return
 
     if phase == "imag":
-        x = data.get("step", np.array([]))
+        x = (
+            data["step"].values
+            if "step" in data.columns
+            else np.arange(len(data))
+        )
         xlabel = "Imaginary time step"
     else:
-        x = data.get("time", np.array([]))
+        x = data["time"].values
         xlabel = "Time (a.u.)"
 
-    norm = data.get("norm", np.array([]))
+    norm = data["norm"].values
 
     if len(x) > 0 and len(norm) > 0:
         ax.plot(x, norm, "b-", linewidth=0.8)
@@ -484,7 +493,7 @@ if __name__ == "__main__":
             fig_imag, ax_imag = plt.subplots(figsize=(8, 6))
             plot_energy_vs_time(ax_imag, imag_data, phase="imag")
 
-            e_vals = imag_data.get("energy_real", [])
+            e_vals = imag_data["energy_real"].values
             if len(e_vals) > 0:
                 final_e = e_vals[-1]
                 ax_imag.text(
@@ -527,3 +536,11 @@ if __name__ == "__main__":
             print(f"Wavefunction evolution GIF: {n_frames} frames")
         else:
             print("No real-time wavefunction snapshots found for animation.")
+
+        # --- Collect all wavefunctions into HDF5 ---
+        h5_path = workdir / "wavefunctions.h5"
+        real_dt = float(config.get("real_dt", 0.1))
+        n_written = collect_wf_to_hdf5(
+            workdir, nx, ny, h5_path, real_dt=real_dt
+        )
+        print(f"Collected {n_written} wavefunctions into {h5_path}")

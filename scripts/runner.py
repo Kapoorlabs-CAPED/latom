@@ -1,6 +1,7 @@
 """Subprocess manager for building and running the C++ TDSE solver."""
 
 import subprocess
+from parser import collect_wf_to_hdf5
 from pathlib import Path
 
 from config import SimulationConfig
@@ -136,3 +137,14 @@ if __name__ == "__main__":
 
     proc.wait()
     print(f"Simulation finished with exit code {proc.returncode}")
+
+    # Collect wavefunctions into HDF5
+    h5_path = workdir / "wavefunctions.h5"
+    n_written = collect_wf_to_hdf5(
+        workdir,
+        config.grid_nx,
+        config.grid_ny,
+        h5_path,
+        real_dt=config.real_dt,
+    )
+    print(f"Collected {n_written} wavefunctions into {h5_path}")
