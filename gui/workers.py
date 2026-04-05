@@ -1,8 +1,15 @@
 """Background QThread workers for build and simulation tasks."""
 
-from PyQt5.QtCore import QThread, pyqtSignal
+import sys
+from pathlib import Path
 
-from ..runner import build_solver, run_simulation
+# Add scripts directory to path for sibling imports — must run before local imports
+_scripts_dir = str(Path(__file__).resolve().parent.parent / "scripts")
+if _scripts_dir not in sys.path:
+    sys.path.insert(0, _scripts_dir)
+
+from PyQt5.QtCore import QThread, pyqtSignal  # noqa: E402
+from runner import build_solver, run_simulation  # noqa: E402
 
 
 class BuildWorker(QThread):

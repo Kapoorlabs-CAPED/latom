@@ -1,5 +1,6 @@
 """Parsers for C++ solver output files."""
 
+import re
 from pathlib import Path
 
 import numpy as np
@@ -125,6 +126,34 @@ def parse_wavefunction(filepath, nx, ny):
         return None
 
     return wf[:expected].reshape(nx, ny)
+
+
+def find_wf_snapshots(output_dir):
+    """Find all real-time wavefunction snapshot files in output directory.
+
+    Looks for files matching wf_real_NNNNNN.dat (periodic dumps)
+    and wf_real_final.dat.
+
+    Args:
+        output_dir: Path to the output directory.
+
+    Returns:
+        Sorted list of (timestep_index, filepath) tuples.
+    """
+    output_dir = Path(output_dir)
+    snapshots = []
+
+    for f in sorted(output_dir.glob("wf_real_*.dat")):
+        if f.name == "wf_real_final.dat":
+            continue
+        m = re.match(r"wf_real_(\d+)\.dat", f.name)
+        if m:
+            snapshots.append((int(m.group(1)), f))
+    # Append final if it exists
+    final = output_dir / "wf_real_final.dat"
+    if final.is_file():
+        snapshots.append((-1, final))
+    return snapshots
 
 
 def tail_observables(filepath, last_n=100):

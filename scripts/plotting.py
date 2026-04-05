@@ -4,11 +4,17 @@ All functions take a matplotlib Axes object and data dict/arrays,
 making them reusable from both scripts and the GUI.
 """
 
-import numpy as np
+from parser import (
+    find_wf_snapshots,
+    parse_imag_observables,
+    parse_real_observables,
+    parse_wavefunction,
+)
 from pathlib import Path
-import matplotlib.pyplot as plt
-from parser import parse_real_observables, parse_wavefunction
 
+import matplotlib.animation as animation
+import matplotlib.pyplot as plt
+import numpy as np
 
 
 def plot_energy_vs_time(ax, data, phase="real"):
@@ -334,71 +340,190 @@ def plot_norm(ax, data, phase="real"):
     ax.grid(True, alpha=0.3)
 
 
+def create_wf_animation(
+    output_dir,
+    nx,
+    ny,
+    dx,
+    dy,
+    gif_path,
+    vmin_orders=7,
+    fps=5,
+    xlim=None,
+    ylim=None,
+):
+    """Create an animated GIF of real-time wavefunction snapshots.
+
+    Loads all wf_real_NNNNNN.dat files from the output directory and
+    creates a GIF showing the time evolution of |psi(x1,x2)|^2.
+
+    Args:
+        output_dir: Path to the directory containing wf_real_*.dat files.
+        nx: Number of grid points in x.
+        ny: Number of grid points in y.
+        dx: Grid spacing in x.
+        dy: Grid spacing in y.
+        gif_path: Output path for the GIF file.
+        vmin_orders: Orders of magnitude below max to display.
+        fps: Frames per second in the GIF.
+        xlim: Optional (xmin, xmax) tuple for zoom.
+        ylim: Optional (ymin, ymax) tuple for zoom.
+
+    Returns:
+        Number of frames in the animation, or 0 if no snapshots found.
+    """
+    output_dir = Path(output_dir)
+    snapshots = find_wf_snapshots(output_dir)
+
+    if not snapshots:
+        print("No wavefunction snapshots found.")
+        return 0
+
+    # Build coordinate arrays
+    x = (np.arange(nx) - nx / 2 + 0.5) * dx
+    y = (np.arange(ny) - ny / 2 + 0.5) * dy
+
+    fig, ax = plt.subplots(figsize=(8, 7))
+
+    # Load first frame to set up the plot
+    ts0, path0 = snapshots[0]
+    wf0 = parse_wavefunction(path0, nx, ny)
+    if wf0 is None:
+        print("Failed to load first snapshot.")
+        return 0
+
+    prob0 = np.abs(wf0) ** 2
+    prob0 = np.clip(prob0 / max(prob0.max(), 1e-30), 1e-30, None)
+    log0 = np.log10(prob0)
+
+    im = ax.pcolormesh(
+        x,
+        y,
+        log0.T,
+        vmin=-vmin_orders,
+        vmax=0.0,
+        cmap="hot_r",
+        shading="auto",
+    )
+    ax.set_xlabel("Electron 1 position (a.u.)")
+    ax.set_ylabel("Electron 2 position (a.u.)")
+    ax.set_aspect("equal")
+    cbar = fig.colorbar(im, ax=ax, fraction=0.046, pad=0.04)
+    cbar.set_label(r"$\log_{10}(|\psi|^2 / \max)$")
+    if xlim:
+        ax.set_xlim(xlim)
+    if ylim:
+        ax.set_ylim(ylim)
+    title = ax.set_title("")
+
+    def update(frame_idx):
+        ts_idx, fpath = snapshots[frame_idx]
+        wf = parse_wavefunction(fpath, nx, ny)
+        if wf is None:
+            return [im, title]
+        prob = np.abs(wf) ** 2
+        pmax = max(prob.max(), 1e-30)
+        prob = np.clip(prob / pmax, 1e-30, None)
+        log_prob = np.log10(prob)
+        im.set_array(log_prob.T.ravel())
+        label = "final" if ts_idx == -1 else f"step {ts_idx}"
+        title.set_text(rf"$|\psi(x_1,x_2)|^2$ — {label}")
+        return [im, title]
+
+    anim = animation.FuncAnimation(
+        fig,
+        update,
+        frames=len(snapshots),
+        blit=False,
+        interval=1000 // fps,
+    )
+    anim.save(str(gif_path), writer="pillow", fps=fps)
+    plt.close(fig)
+    print(f"Animation saved to {gif_path} ({len(snapshots)} frames)")
+    return len(snapshots)
+
+
 def load_config(filepath):
     """Parse the simulation.cfg file into a dictionary."""
     conf = {}
-    with open(filepath, 'r') as f:
+    with open(filepath) as f:
         for line in f:
             line = line.strip()
-            if not line or line.startswith('#'):
+            if not line or line.startswith("#"):
                 continue
-            key, val = line.split('=')
+            key, val = line.split("=")
             conf[key.strip()] = val.strip()
     return conf
 
 
 if __name__ == "__main__":
-    workdir = Path(__file__).resolve().parents[1]/'res' 
+    workdir = Path(__file__).resolve().parents[1] / "res"
 
     cfg_path = workdir / "simulation.cfg"
 
     if cfg_path.exists():
         config = load_config(cfg_path)
-        nx, ny = int(config['grid_nx']), int(config['grid_ny'])
-        dx, dy = float(config['grid_dx']), float(config['grid_dy'])
-        
-        # 1. Load All Data
-        real_data = parse_real_observables(workdir / config['obser_file'])
-        imag_data = parse_real_observables(workdir / config['obser_imag_file'])
-        wf_data = parse_wavefunction(workdir / config['wf_file'], nx, ny)
+        nx, ny = int(config["grid_nx"]), int(config["grid_ny"])
+        dx, dy = float(config["grid_dx"]), float(config["grid_dy"])
 
-        # --- WINDOW 1: Imaginary Phase (Standalone) ---
+        # Load all data
+        real_data = parse_real_observables(workdir / config["obser_file"])
+        imag_data = parse_imag_observables(workdir / config["obser_imag_file"])
+
+        # --- Ground state wavefunction (single converged result) ---
+        wf_ground = parse_wavefunction(workdir / "wf_ground.dat", nx, ny)
+        if wf_ground is not None:
+            fig_gs, ax_gs = plt.subplots(figsize=(8, 8))
+            plot_wavefunction_2d(ax_gs, wf_ground, dx, dy, nx, ny)
+            ax_gs.set_title(r"Ground State $|\psi_0(x_1,x_2)|^2$")
+            fig_gs.savefig(workdir / "ground_state_wf.png")
+            print("Ground state wavefunction plot saved.")
+
+        # --- Imaginary time energy convergence ---
         if imag_data is not None:
             fig_imag, ax_imag = plt.subplots(figsize=(8, 6))
             plot_energy_vs_time(ax_imag, imag_data, phase="imag")
-            
-            # Extract the last energy value (the converged ground state)
+
             e_vals = imag_data.get("energy_real", [])
             if len(e_vals) > 0:
                 final_e = e_vals[-1]
-                # Add text to the plot showing the converged value
-                ax_imag.text(0.05, 0.95, f"Converged E: {final_e:.6f} a.u.", 
-                             transform=ax_imag.transAxes, 
-                             verticalalignment='top',
-                             bbox=dict(boxstyle='round', facecolor='white', alpha=0.5))
+                ax_imag.text(
+                    0.05,
+                    0.95,
+                    f"Converged E: {final_e:.6f} a.u.",
+                    transform=ax_imag.transAxes,
+                    verticalalignment="top",
+                    bbox=dict(boxstyle="round", facecolor="white", alpha=0.5),
+                )
                 print(f"Imaginary time converged to: {final_e:.6f} a.u.")
-            
+
             fig_imag.savefig(workdir / "imaginary_phase.png")
 
-        # --- WINDOW 2: Real-Time Dashboard (Subplots of all variables) ---
+        # --- Real-time dashboard ---
         if real_data is not None:
             fig_real, axes = plt.subplots(3, 2, figsize=(12, 15))
             fig_real.suptitle("Real-Time Propagation Dashboard", fontsize=16)
-            
-            # Use your specific plotting functions for each subplot
+
             plot_energy_vs_time(axes[0, 0], real_data, phase="real")
             plot_dipole(axes[0, 1], real_data)
             plot_ionization(axes[1, 0], real_data)
             plot_vector_potential(axes[1, 1], real_data)
             plot_spectrum(axes[2, 0], real_data)
-            
+
             plt.tight_layout(rect=[0, 0.03, 1, 0.95])
             fig_real.savefig(workdir / "real_time_dashboard.png")
 
-        # --- WINDOW 3: Wavefunction 2D (Standalone) ---
-        if wf_data is not None:
-            fig_wf, ax_wf = plt.subplots(figsize=(8, 8))
-            plot_wavefunction_2d(ax_wf, wf_data, dx, dy, nx, ny)
-            fig_wf.savefig(workdir / "wavefunction_2d.png")
-
-        
+        # --- Animated GIF of real-time wavefunction evolution ---
+        n_frames = create_wf_animation(
+            workdir,
+            nx,
+            ny,
+            dx,
+            dy,
+            gif_path=workdir / "wf_evolution.gif",
+            fps=5,
+        )
+        if n_frames > 0:
+            print(f"Wavefunction evolution GIF: {n_frames} frames")
+        else:
+            print("No real-time wavefunction snapshots found for animation.")

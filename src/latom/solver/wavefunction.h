@@ -131,6 +131,8 @@ class wavefunction
 
     void nullify();
 
+    void gram_schmidt_project(grid g, const wavefunction* lower_states, int n_lower);
+
     void calculate_fixed_potential_array_x(grid g, hamop hamil, double time, int me);
     void calculate_fixed_potential_array_y(grid g, hamop hamil, double time, int me);
     void calculate_fixed_potential_array_z(grid g, hamop hamil, double time, int me);

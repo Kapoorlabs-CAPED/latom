@@ -19,6 +19,27 @@ void wavefunction::nullify()
 }
 
 
+void wavefunction::gram_schmidt_project(grid g, const wavefunction* lower_states, int n_lower)
+{
+  // Project out all lower states: |this> = |this> - sum_k <k|this> * dV * |k>
+  // where dV = dx * dy is the volume element for the 2D grid
+  double dV = g.delt_x() * g.delt_y();
+  for (int k = 0; k < n_lower; k++)
+    {
+      complex<double> overlap(0.0, 0.0);
+      for (long i = 0; i < wf_dim; i++)
+        {
+          overlap += conj(lower_states[k][i]) * start[i];
+        }
+      overlap *= dV;
+      for (long i = 0; i < wf_dim; i++)
+        {
+          start[i] -= overlap * lower_states[k][i];
+        }
+    }
+}
+
+
 // ------------------ for other overloaded version see below ------------------
 void wavefunction::init(grid g, int inittype, double width, double k, double time, FILE* filename, int output_of_interest)
 {

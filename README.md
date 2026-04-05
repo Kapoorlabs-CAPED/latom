@@ -3,61 +3,237 @@
 [![License BSD-3](https://img.shields.io/pypi/l/latom.svg?color=green)](https://github.com/Kapoorlabs-CAPED/latom/raw/main/LICENSE)
 [![PyPI](https://img.shields.io/pypi/v/latom.svg?color=green)](https://pypi.org/project/latom)
 [![Python Version](https://img.shields.io/pypi/pyversions/latom.svg?color=green)](https://python.org)
-[![tests](https://github.com/Kapoorlabs-CAPED/latom/workflows/tests/badge.svg)](https://github.com/Kapoorlabs-CAPED/latom/actions)
-[![codecov](https://codecov.io/gh/Kapoorlabs-CAPED/latom/branch/main/graph/badge.svg)](https://codecov.io/gh/Kapoorlabs-CAPED/latom)
 
+A quantum mechanical solver for low-dimensional atomic systems. Solves the time-dependent Schrodinger equation (TDSE) for a 1D model of Helium (two electrons, each in one dimension) using the Crank-Nicolson propagator. Includes a PyQt5 GUI for parameter configuration and matplotlib-based visualization.
 
-A quantum mechanical solver for low dimensional atomic systems, solving time dependent Schrödinger and Kohn Sham equations using Crank Nicolson Propogator
+## What the code does
 
-----------------------------------
+### Ground state via imaginary time propagation
 
-This [caped] package was generated with [Cookiecutter] using [@caped]'s [cookiecutter-template] template.
+Propagates an initial random wavefunction in imaginary time (t -> -i*tau). Higher-energy components decay exponentially faster, so after enough steps the wavefunction converges to the ground state. The wavefunction is renormalized after each step.
 
+### Excited states via Gram-Schmidt orthogonalization
 
+After computing the ground state, higher excited states are obtained one at a time. For the n-th excited state:
+1. Start with a new random wavefunction
+2. Propagate in imaginary time
+3. After each step, project out all lower converged states (Gram-Schmidt)
+4. Renormalize
+
+This gives the first N spin-singlet eigenstates of the Hamiltonian.
+
+### Real time propagation with laser field
+
+The converged ground state is propagated in real time under an external laser field in the **velocity gauge**. The vector potential A(t) couples to the electrons via the A*p term in the kinetic energy. The code records observables at each timestep and dumps wavefunction snapshots at configurable intervals.
+
+### Crank-Nicolson split-operator scheme
+
+The 2D Hamiltonian is split into x- and y-direction kinetic operators, single-particle potentials, and the electron-electron interaction. Each direction is solved implicitly via tridiagonal matrix inversion (Thomas algorithm). The interaction potential exp(-i*dt*V_ee) is applied as a multiplicative phase.
+
+### Observables
+
+- Total energy (real and imaginary parts)
+- Dipole expectation values (electron 1 and electron 2 positions)
+- Wavefunction norm
+- Ground state population |<psi_0|psi(t)>|^2
+- Vector potential A(t)
+- HHG spectrum (FFT of dipole acceleration)
+- Single and double ionization probabilities
+
+### Visualization
+
+- 2D wavefunction |psi(x1,x2)|^2 as log-scale heatmap (replaces legacy IDL scripts)
+- Energy convergence during imaginary time
+- Real-time dashboard: energy, dipole, ionization, vector potential, spectrum
+- Animated GIF of wavefunction time evolution
+- 1D marginal density profiles
+
+## The Hamiltonian
+
+```
+H = T_x + T_y + V_x + V_y + V_ee
+
+T_mu = -1/2 * d^2/dx_mu^2                    (kinetic energy)
+V_x  = -Z / sqrt(x^2 + eps^2)                (electron-nucleus Coulomb, Z=2)
+V_y  = -Z / sqrt(y^2 + eps^2)                (electron-nucleus Coulomb, Z=2)
+V_ee = 1 / sqrt((x-y)^2 + eps^2)             (electron-electron repulsion)
+```
+
+In the velocity gauge with laser field:
+```
+T_mu -> T_mu + A(t)*p_mu + A(t)^2/2
+```
+
+The softening parameter eps (default 1.0 a.u.) regularizes the Coulomb singularity in 1D.
+
+## Atomic units conversion table
+
+All quantities in the code are in **atomic units** (a.u.). Here are the key conversions:
+
+### Fundamental constants in atomic units
+
+| Quantity | a.u. value | SI value |
+|----------|-----------|----------|
+| Electron mass m_e | 1 | 9.109 x 10^-31 kg |
+| Elementary charge e | 1 | 1.602 x 10^-19 C |
+| Reduced Planck constant hbar | 1 | 1.055 x 10^-34 J*s |
+| Bohr radius a_0 | 1 | 5.292 x 10^-11 m = 0.5292 A |
+| Hartree energy E_h | 1 | 4.360 x 10^-18 J = 27.211 eV |
+| Atomic time unit | 1 | 2.419 x 10^-17 s = 24.19 as |
+
+### Wavelength / Frequency
+
+| Wavelength (nm) | Frequency (a.u.) | Notes |
+|-----------------|-------------------|-------|
+| 800 | 0.0570 | Ti:Sapphire laser |
+| 400 | 0.1140 | Second harmonic of 800 nm |
+| 200 | 0.2279 | Deep UV |
+| 1064 | 0.0428 | Nd:YAG |
+| 10.6 um | 0.00428 | CO2 laser |
+
+**Conversion formula:**
+```
+omega (a.u.) = 45.5634 / wavelength (nm)
+wavelength (nm) = 45.5634 / omega (a.u.)
+```
+
+The code default frequency is 1.556 a.u., corresponding to ~29.3 nm (XUV range).
+
+### Electric field strength / Intensity
+
+| Intensity (W/cm^2) | E-field (a.u.) | A-field amplitude (a.u.) at 800 nm |
+|--------------------|----------------|-------------------------------------|
+| 10^12 | 0.00534 | 0.0937 |
+| 10^13 | 0.01688 | 0.2962 |
+| 10^14 | 0.05338 | 0.9366 |
+| 10^15 | 0.16882 | 2.9618 |
+| 10^16 | 0.53381 | 9.3658 |
+
+**Conversion formulas:**
+```
+E_0 (a.u.) = sqrt(I (W/cm^2) / 3.51 x 10^16)
+I (W/cm^2) = 3.51 x 10^16 * E_0^2 (a.u.)
+
+A_0 (a.u.) = E_0 (a.u.) / omega (a.u.)
+```
+
+The atomic unit of electric field is E_h / (e * a_0) = 5.142 x 10^11 V/m.
+
+### Energy
+
+| Energy (a.u.) | eV | Notes |
+|--------------|-----|-------|
+| -2.904 | -79.01 | Helium ground state (exact) |
+| -2.146 | -58.38 | He+ ground state (exact: -Z^2/2 = -2) |
+| 0.0570 | 1.55 | 800 nm photon |
+| 1.0 | 27.21 | 1 Hartree |
+
+### Time
+
+| Time (a.u.) | fs | Optical cycles at 800 nm |
+|------------|-----|--------------------------|
+| 1 | 0.02419 | 0.0218 |
+| 41.34 | 1.0 | 0.902 |
+| 110.3 | 2.669 | 1.0 (one cycle at 800 nm) |
+| 1000 | 24.19 | 9.02 |
+
+**Conversion:**
+```
+t (a.u.) = t (fs) / 0.02419
+t (fs) = t (a.u.) * 0.02419
+```
+
+### Vector potential in velocity gauge
+
+In the velocity gauge the laser-electron coupling is through A(t), not E(t). The relation:
+```
+E(t) = -dA/dt
+```
+
+For a monochromatic field E(t) = E_0 sin(omega*t):
+```
+A(t) = (E_0/omega) cos(omega*t) = A_0 cos(omega*t)
+```
+
+The code uses A(t) = A_0 * sin^2(pi*t/T) * sin(omega*t), where T is the total pulse duration and sin^2 provides a smooth envelope.
+
+The `laser_alpha` parameter in the config is A_0/omega (the "alpha" or quiver amplitude), so:
+```
+A_0 = laser_alpha * laser_freq
+E_0 = laser_alpha * laser_freq^2
+I = 3.51e16 * (laser_alpha * laser_freq^2)^2  W/cm^2
+```
 
 ## Installation
 
-You can install `latom` via [pip]:
+```bash
+pip install latom
+```
 
-    pip install latom
+Development install:
+```bash
+git clone https://github.com/Kapoorlabs-CAPED/latom.git
+cd latom
+pip install -e .
+```
 
+Build the C++ solver:
+```bash
+cd src/latom/solver
+make
+```
 
+## Usage
 
-To install latest development version :
+### GUI
 
-    pip install git+https://github.com/Kapoorlabs-CAPED/latom.git
+```bash
+python gui/main_window.py
+```
 
+### Command line (scripts)
 
-## Contributing
+Run a simulation:
+```bash
+cd scripts
+python runner.py
+```
 
-Contributions are very welcome. Tests can be run with [tox], please ensure
-the coverage at least stays the same before you submit a pull request.
+Plot results:
+```bash
+python plotting.py
+```
+
+### Configuration
+
+All parameters can be set via the GUI or a JSON config file. Key parameters:
+
+| Parameter | Default | Description |
+|-----------|---------|-------------|
+| grid_nx, grid_ny | 1500 | Grid points per dimension |
+| grid_dx, grid_dy | 0.2 | Grid spacing (a.u.) |
+| imag_dt | 0.25 | Imaginary time step |
+| imag_steps | 100 | Imaginary time steps for ground state |
+| real_dt | 0.1 | Real time step |
+| real_steps | 2000 | Real time propagation steps |
+| laser_freq | 1.556 | Laser frequency (a.u.) |
+| laser_alpha | 0.1 | Quiver amplitude E_0/omega^2 |
+| laser_cycles | 40 | Number of optical cycles in pulse |
+| n_excited | 0 | Number of excited states to compute |
+| load_ground | 0 | Load ground state from file (1) or compute (0) |
+| coulomb_eps | 1.0 | Coulomb softening parameter |
+| absorb_ampl | 50.0 | Absorbing boundary strength |
+
+## Project structure
+
+```
+latom/
+  src/latom/
+    solver/          C++ source (TDSE.cc, wavefunction.cc, etc.)
+  gui/               PyQt5 GUI (main_window.py, workers.py, etc.)
+  scripts/           Standalone scripts (runner.py, plotting.py, etc.)
+```
 
 ## License
 
-Distributed under the terms of the [BSD-3] license,
-"latom" is free and open source software
-
-## Issues
-
-If you encounter any problems, please [file an issue] along with a detailed description.
-
-
-[pip]: https://pypi.org/project/pip/
-[caped]: https://github.com/Kapoorlabs-CAPED
-[Cookiecutter]: https://github.com/audreyr/cookiecutter
-[@caped]: https://github.com/Kapoorlabs-CAPED
-[MIT]: http://opensource.org/licenses/MIT
-[BSD-3]: http://opensource.org/licenses/BSD-3-Clause
-[GNU GPL v3.0]: http://www.gnu.org/licenses/gpl-3.0.txt
-[GNU LGPL v3.0]: http://www.gnu.org/licenses/lgpl-3.0.txt
-[Apache Software License 2.0]: http://www.apache.org/licenses/LICENSE-2.0
-[Mozilla Public License 2.0]: https://www.mozilla.org/media/MPL/2.0/index.txt
-[cookiecutter-template]: https://github.com/Kapoorlabs-CAPED/cookiecutter-template
-
-[file an issue]: https://github.com/Kapoorlabs-CAPED/latom/issues
-
-[caped]: https://github.com/Kapoorlabs-CAPED/
-[tox]: https://tox.readthedocs.io/en/latest/
-[pip]: https://pypi.org/project/pip/
-[PyPI]: https://pypi.org/
+BSD-3-Clause
