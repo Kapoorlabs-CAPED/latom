@@ -3,6 +3,7 @@
 import subprocess
 from pathlib import Path
 from config import SimulationConfig
+import latom
 
 def get_solver_dir():
     """Return the path to the C++ solver source directory.
@@ -10,7 +11,8 @@ def get_solver_dir():
     Returns:
         Path to the solver directory containing Makefile and sources.
     """
-    return Path(__file__).parent / "solver"
+    package_root = Path(latom.__file__).resolve().parent
+    return package_root / "solver"
 
 
 def is_solver_built(solver_dir=None):
@@ -114,12 +116,13 @@ def run_simulation(config, work_dir, solver_dir=None, on_output=None):
 
 if __name__=='__main__':
 
-    workdir = Path(__file__).resolve().parents[2] 
+    workdir = Path(__file__).resolve().parents[1]/'res' 
 
     workdir.mkdir(parents=True, exist_ok=True)
     
     print(f'Work directory set to {workdir}')
     config = SimulationConfig() 
+    config.write_ini(workdir/'test_config')
     build_solver()
     print("Starting simulation...")
     # Capture the process handle
