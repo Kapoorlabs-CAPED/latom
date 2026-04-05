@@ -10,6 +10,7 @@ import matplotlib.pyplot as plt
 from parser import parse_real_observables, parse_wavefunction
 
 
+
 def plot_energy_vs_time(ax, data, phase="real"):
     """Plot energy vs time from observable data.
 
@@ -346,44 +347,58 @@ def load_config(filepath):
     return conf
 
 
-
 if __name__ == "__main__":
-    # Path logic
-    workdir = Path(__file__).resolve().parents[2] / 'res'
+    workdir = Path(__file__).resolve().parents[1]/'res' 
+
     cfg_path = workdir / "simulation.cfg"
 
     if cfg_path.exists():
         config = load_config(cfg_path)
-
-        # Fix: Access dictionary via keys and convert types
-        nx = int(config['grid_nx'])
-        ny = int(config['grid_ny'])
-        dx = float(config['grid_dx'])
-        dy = float(config['grid_dy'])
+        nx, ny = int(config['grid_nx']), int(config['grid_ny'])
+        dx, dy = float(config['grid_dx']), float(config['grid_dy'])
         
-        # Load data using filenames from config
-        obs_data = parse_real_observables(workdir / config['obser_file'])
+        # 1. Load All Data
+        real_data = parse_real_observables(workdir / config['obser_file'])
         imag_data = parse_real_observables(workdir / config['obser_imag_file'])
         wf_data = parse_wavefunction(workdir / config['wf_file'], nx, ny)
 
-        # Plot
-        fig, (ax1, ax2, ax3) = plt.subplots(1, 3, figsize=(20, 6))
-        
-        if imag_data:
-            plot_energy_vs_time(ax1, imag_data, phase="imag")
-        
+        # --- WINDOW 1: Imaginary Phase (Standalone) ---
+        if imag_data is not None:
+            fig_imag, ax_imag = plt.subplots(figsize=(8, 6))
+            plot_energy_vs_time(ax_imag, imag_data, phase="imag")
+            
+            # Extract the last energy value (the converged ground state)
+            e_vals = imag_data.get("energy_real", [])
+            if len(e_vals) > 0:
+                final_e = e_vals[-1]
+                # Add text to the plot showing the converged value
+                ax_imag.text(0.05, 0.95, f"Converged E: {final_e:.6f} a.u.", 
+                             transform=ax_imag.transAxes, 
+                             verticalalignment='top',
+                             bbox=dict(boxstyle='round', facecolor='white', alpha=0.5))
+                print(f"Imaginary time converged to: {final_e:.6f} a.u.")
+            
+            fig_imag.savefig(workdir / "imaginary_phase.png")
 
-        if obs_data:
-            plot_energy_vs_time(ax2, obs_data, phase="real")
-        
+        # --- WINDOW 2: Real-Time Dashboard (Subplots of all variables) ---
+        if real_data is not None:
+            fig_real, axes = plt.subplots(3, 2, figsize=(12, 15))
+            fig_real.suptitle("Real-Time Propagation Dashboard", fontsize=16)
+            
+            # Use your specific plotting functions for each subplot
+            plot_energy_vs_time(axes[0, 0], real_data, phase="real")
+            plot_dipole(axes[0, 1], real_data)
+            plot_ionization(axes[1, 0], real_data)
+            plot_vector_potential(axes[1, 1], real_data)
+            plot_spectrum(axes[2, 0], real_data)
+            
+            plt.tight_layout(rect=[0, 0.03, 1, 0.95])
+            fig_real.savefig(workdir / "real_time_dashboard.png")
+
+        # --- WINDOW 3: Wavefunction 2D (Standalone) ---
         if wf_data is not None:
-            plot_wavefunction_2d(ax3, wf_data, dx, dy, nx, ny)
+            fig_wf, ax_wf = plt.subplots(figsize=(8, 8))
+            plot_wavefunction_2d(ax_wf, wf_data, dx, dy, nx, ny)
+            fig_wf.savefig(workdir / "wavefunction_2d.png")
 
-        plt.tight_layout()
         
-        # Save the file to the res folder
-        save_path = workdir / "simulation_plot.png"
-        plt.savefig(save_path)
-        print(f"Plot saved to {save_path}")
-        
-        plt.show()
