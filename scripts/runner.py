@@ -2,8 +2,11 @@
 
 import subprocess
 from pathlib import Path
+
 from config import SimulationConfig
+
 import latom
+
 
 def get_solver_dir():
     """Return the path to the C++ solver source directory.
@@ -87,12 +90,12 @@ def run_simulation(config, work_dir, solver_dir=None, on_output=None):
     solver_dir = Path(solver_dir)
     work_dir = Path(work_dir)
 
-    # Create output directory
-    output_path = work_dir / config.output_dir
-    output_path.mkdir(parents=True, exist_ok=True)
+    # Ensure work directory exists — solver writes all files here
+    work_dir.mkdir(parents=True, exist_ok=True)
 
-    # Write config file
+    # Write config file, overriding output_dir to "." since cwd is work_dir
     config_path = work_dir / "simulation.cfg"
+    config.output_dir = "."
     config.write_ini(config_path)
 
     # Find the TDSE binary
@@ -102,7 +105,6 @@ def run_simulation(config, work_dir, solver_dir=None, on_output=None):
             f"TDSE binary not found at {tdse_bin}. Run build_solver() first."
         )
 
-    
     proc = subprocess.Popen(
         [str(tdse_bin), str(config_path)],
         cwd=str(work_dir),
@@ -114,23 +116,23 @@ def run_simulation(config, work_dir, solver_dir=None, on_output=None):
     return proc
 
 
-if __name__=='__main__':
+if __name__ == "__main__":
 
-    workdir = Path(__file__).resolve().parents[1]/'res' 
+    workdir = Path(__file__).resolve().parents[1] / "res"
 
     workdir.mkdir(parents=True, exist_ok=True)
-    
-    print(f'Work directory set to {workdir}')
-    config = SimulationConfig() 
-    config.write_ini(workdir/'test_config')
+
+    print(f"Work directory set to {workdir}")
+    config = SimulationConfig()
+    config.write_ini(workdir / "test_config")
     build_solver()
     print("Starting simulation...")
     # Capture the process handle
     proc = run_simulation(config, workdir)
-    
+
     # WAIT for it to finish and print output
     for line in proc.stdout:
         print(line.rstrip())
-        
+
     proc.wait()
     print(f"Simulation finished with exit code {proc.returncode}")
