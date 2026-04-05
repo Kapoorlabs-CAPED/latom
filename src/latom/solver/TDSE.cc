@@ -232,7 +232,7 @@ int main(int argc, char **argv)
       counter_i++;
       counter_ii++;
       time=real(timestep*(complex<double>)(ts));
-      cout << "Real: " << ts << "  " << " erwart_x wf : " << wf.expect_x(g) << " " << " Energie " << real(complenerg) << " " << endl;
+      cout << "Real: " << ts << "  " << " Expectation value x : " << wf.expect_x(g) << " " << " Energy " << real(complenerg) << " " << endl;
 
       wf.propagate(timestep, time, g, hamilton, me, vecpotflag, staticpot_x, staticpot_y, staticpot_xy, charge);
 
