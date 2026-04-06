@@ -33,6 +33,29 @@ def is_solver_built(solver_dir=None):
     return (Path(solver_dir) / "TDSE").is_file()
 
 
+def is_solver_stale(solver_dir=None):
+    """Check if any source file is newer than the TDSE binary.
+
+    Args:
+        solver_dir: Path to solver directory. Uses default if None.
+
+    Returns:
+        True if the binary is out of date and needs rebuilding.
+    """
+    if solver_dir is None:
+        solver_dir = get_solver_dir()
+    solver_dir = Path(solver_dir)
+    binary = solver_dir / "TDSE"
+    if not binary.is_file():
+        return True
+    binary_mtime = binary.stat().st_mtime
+    for ext in ("*.cc", "*.h"):
+        for src in solver_dir.glob(ext):
+            if src.stat().st_mtime > binary_mtime:
+                return True
+    return False
+
+
 def build_solver(solver_dir=None, on_output=None):
     """Compile the C++ solver using make.
 

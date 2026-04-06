@@ -1,5 +1,6 @@
 """Main PyQt5 window for the latom TDSE solver GUI."""
 
+import re  # noqa: E402
 import sys  # noqa: E402
 from pathlib import Path  # noqa: E402
 
@@ -47,7 +48,7 @@ from PyQt5.QtWidgets import (  # noqa: E402
     QVBoxLayout,
     QWidget,
 )
-from runner import is_solver_built  # noqa: E402
+from runner import is_solver_built, is_solver_stale  # noqa: E402
 from workers import BuildWorker, SimulationWorker  # noqa: E402
 
 
@@ -115,6 +116,7 @@ class MainWindow(QMainWindow):
         tab_names = [
             "Energy (Imag)",
             "Ground State WF",
+            "Excited States",
             "Energy (Real)",
             "Dipole",
             "Ionization",
@@ -123,7 +125,8 @@ class MainWindow(QMainWindow):
             "1D Density",
         ]
         for name in tab_names:
-            canvas = PlotCanvas()
+            # "Excited States" manages its own subplot grid — no default axes
+            canvas = PlotCanvas(single_axes=(name != "Excited States"))
             self._canvases[name] = canvas
             self.tabs.addTab(canvas, name)
 
@@ -237,9 +240,29 @@ class MainWindow(QMainWindow):
             "N excited states", 0, 20, self.config.n_excited
         )
         lay.addWidget(r)
+        r, self.spin_excited_imag_mult = self._make_spin(
+            "Excited steps multiplier", 1, 100, self.config.excited_imag_mult
+        )
+        r.setToolTip(
+            "Multiplier for excited state imaginary time steps.\n"
+            "State N gets N × multiplier × imag_steps.\n"
+            "Default 1: state 1 gets imag_steps, state 2 gets 2×imag_steps, etc."
+        )
+        lay.addWidget(r)
         self.chk_load_ground = QCheckBox("Load ground state from file")
         self.chk_load_ground.setChecked(bool(self.config.load_ground))
         lay.addWidget(self.chk_load_ground)
+        self.chk_load_excited = QCheckBox("Load excited states from file")
+        self.chk_load_excited.setChecked(bool(self.config.load_excited))
+        self.chk_load_excited.setToolTip(
+            "When checked, loads wf_excited_N.dat if it exists instead of recomputing."
+        )
+        lay.addWidget(self.chk_load_excited)
+        r, self.spin_laser_init_state = self._make_spin(
+            "Laser initial state", 0, 20, self.config.laser_init_state
+        )
+        r.setToolTip("0 = ground state, N = Nth excited state")
+        lay.addWidget(r)
 
         # Autoionizing mode (Feit-Fleck-Steiger)
         self.chk_auto_mode = QCheckBox(
@@ -325,6 +348,26 @@ class MainWindow(QMainWindow):
         btn_layout3.addWidget(btn_gif)
 
         lay.addWidget(btn_row3)
+
+        btn_row4 = QWidget()
+        btn_layout4 = QHBoxLayout(btn_row4)
+        btn_layout4.setContentsMargins(0, 0, 0, 0)
+
+        btn_load_exc = QPushButton("Load Excited States from File")
+        btn_load_exc.clicked.connect(self._on_load_excited_states)
+        btn_load_exc.setToolTip(
+            "Scan output directory for wf_excited_N.dat files and display them."
+        )
+        btn_layout4.addWidget(btn_load_exc)
+
+        btn_load_exc_pick = QPushButton("Load Single Excited State...")
+        btn_load_exc_pick.clicked.connect(self._on_load_excited_state_pick)
+        btn_load_exc_pick.setToolTip(
+            "Pick a specific wf_excited_N.dat file to load and display."
+        )
+        btn_layout4.addWidget(btn_load_exc_pick)
+
+        lay.addWidget(btn_row4)
         return grp
 
     # ------------------------------------------------------------ Actions
@@ -336,12 +379,17 @@ class MainWindow(QMainWindow):
         )
 
     def _update_build_status(self):
-        if is_solver_built():
-            self.build_status_label.setText("Solver: built")
-            self.build_status_label.setStyleSheet("color: green;")
-        else:
+        if not is_solver_built():
             self.build_status_label.setText("Solver: not built")
             self.build_status_label.setStyleSheet("color: red;")
+        elif is_solver_stale():
+            self.build_status_label.setText(
+                "Solver: REBUILD NEEDED (source changed)"
+            )
+            self.build_status_label.setStyleSheet("color: orange;")
+        else:
+            self.build_status_label.setText("Solver: built (up to date)")
+            self.build_status_label.setStyleSheet("color: green;")
 
     def _collect_config(self):
         """Read GUI spin boxes into a SimulationConfig."""
@@ -361,7 +409,10 @@ class MainWindow(QMainWindow):
             absorb_ampl=self.spin_absorb.value(),
             ionization_box=self.spin_box.value(),
             n_excited=self.spin_n_excited.value(),
+            excited_imag_mult=self.spin_excited_imag_mult.value(),
             load_ground=1 if self.chk_load_ground.isChecked() else 0,
+            load_excited=1 if self.chk_load_excited.isChecked() else 0,
+            laser_init_state=self.spin_laser_init_state.value(),
             auto_mode=1 if self.chk_auto_mode.isChecked() else 0,
             auto_target_energy=self.spin_auto_target_energy.value(),
             kick_mode=1 if self.chk_kick_mode.isChecked() else 0,
@@ -385,7 +436,10 @@ class MainWindow(QMainWindow):
         self.spin_absorb.setValue(self.config.absorb_ampl)
         self.spin_box.setValue(self.config.ionization_box)
         self.spin_n_excited.setValue(self.config.n_excited)
+        self.spin_excited_imag_mult.setValue(self.config.excited_imag_mult)
         self.chk_load_ground.setChecked(bool(self.config.load_ground))
+        self.chk_load_excited.setChecked(bool(self.config.load_excited))
+        self.spin_laser_init_state.setValue(self.config.laser_init_state)
         self.chk_auto_mode.setChecked(bool(self.config.auto_mode))
         self.spin_auto_target_energy.setValue(self.config.auto_target_energy)
         self.chk_kick_mode.setChecked(bool(self.config.kick_mode))
@@ -413,6 +467,14 @@ class MainWindow(QMainWindow):
     def _on_run(self):
         if not is_solver_built():
             QMessageBox.warning(self, "Not Built", "Build the solver first.")
+            return
+        if is_solver_stale():
+            QMessageBox.warning(
+                self,
+                "Rebuild Required",
+                "Source files have changed since the last build.\n"
+                "Click 'Build Solver' before running.",
+            )
             return
 
         self._collect_config()
@@ -557,25 +619,35 @@ class MainWindow(QMainWindow):
         plot_density_1d(c.axes, wf_latest, dx, dy, nx, ny)
         c.clear_and_draw()
 
-        # Excited state wavefunctions — add/update tabs dynamically
+        # Excited state wavefunctions — all in a single tab with grid layout
+        excited_wfs = []
         for n in range(1, 21):
-            tab_name = f"Excited {n} WF"
             exc_file = out / f"wf_excited_{n}.dat"
             if exc_file.is_file():
                 wf_exc = parse_wavefunction(exc_file, nx, ny)
-                if tab_name not in self._canvases:
-                    canvas = PlotCanvas()
-                    self._canvases[tab_name] = canvas
-                    self.tabs.addTab(canvas, tab_name)
-                c = self._canvases[tab_name]
-                plot_wavefunction_2d(c.axes, wf_exc, dx, dy, nx, ny)
                 if wf_exc is not None:
-                    c.axes.set_title(
-                        rf"Excited State {n} $|\psi_{n}(x_1,x_2)|^2$"
-                    )
-                c.clear_and_draw()
+                    excited_wfs.append((n, wf_exc))
             else:
                 break
+
+        if excited_wfs:
+            self._draw_excited_states(excited_wfs, dx, dy, nx, ny)
+        else:
+            c = self._canvases["Excited States"]
+            c.fig.clear()
+            ax = c.fig.add_subplot(111)
+            ax.text(
+                0.5,
+                0.5,
+                "No excited states computed yet",
+                ha="center",
+                va="center",
+                transform=ax.transAxes,
+                fontsize=12,
+            )
+            ax.axis("off")
+            c.fig.tight_layout(pad=2.0)
+            c.draw()
 
     def _on_create_gif(self):
         """Create animated GIF from real-time wavefunction snapshots."""
@@ -599,6 +671,98 @@ class MainWindow(QMainWindow):
                 self._log("No wavefunction snapshots found for animation.")
         except Exception as e:
             self._log(f"GIF creation failed: {e}")
+
+    def _on_load_excited_states(self):
+        """Scan output directory for wf_excited_N.dat files and display them."""
+        out = self._get_output_dir()
+        nx = self.config.grid_nx
+        ny = self.config.grid_ny
+        dx = self.config.grid_dx
+        dy = self.config.grid_dy
+
+        excited_wfs = []
+        for n in range(1, 21):
+            exc_file = out / f"wf_excited_{n}.dat"
+            if exc_file.is_file():
+                wf_exc = parse_wavefunction(exc_file, nx, ny)
+                if wf_exc is not None:
+                    excited_wfs.append((n, wf_exc))
+            else:
+                break
+
+        if not excited_wfs:
+            self._log("No wf_excited_N.dat files found in output directory.")
+            return
+
+        self._log(f"Loaded {len(excited_wfs)} excited state(s) from file.")
+        self._draw_excited_states(excited_wfs, dx, dy, nx, ny)
+        # Switch to the Excited States tab
+        for i in range(self.tabs.count()):
+            if self.tabs.tabText(i) == "Excited States":
+                self.tabs.setCurrentIndex(i)
+                break
+
+    def _on_load_excited_state_pick(self):
+        """Open a file dialog to pick a specific excited state file."""
+        path, _ = QFileDialog.getOpenFileName(
+            self,
+            "Load Excited State Wavefunction",
+            str(self._get_output_dir()),
+            "DAT files (*.dat)",
+        )
+        if not path:
+            return
+
+        nx = self.config.grid_nx
+        ny = self.config.grid_ny
+        dx = self.config.grid_dx
+        dy = self.config.grid_dy
+
+        wf_exc = parse_wavefunction(Path(path), nx, ny)
+        if wf_exc is None:
+            self._log(f"Failed to load wavefunction from {path}")
+            return
+
+        m = re.search(r"wf_excited_(\d+)", Path(path).name)
+        n = int(m.group(1)) if m else 0
+        label = f"Excited {n}" if n else Path(path).stem
+
+        self._log(f"Loaded excited state from {path}")
+        self._draw_excited_states(
+            [(n or 1, wf_exc)], dx, dy, nx, ny, titles=[label]
+        )
+        for i in range(self.tabs.count()):
+            if self.tabs.tabText(i) == "Excited States":
+                self.tabs.setCurrentIndex(i)
+                break
+
+    def _draw_excited_states(self, excited_wfs, dx, dy, nx, ny, titles=None):
+        """Render excited state wavefunctions into the Excited States tab."""
+        c = self._canvases["Excited States"]
+        c.fig.clear()
+
+        n_states = len(excited_wfs)
+        n_cols = min(n_states, 3)
+        n_rows = (n_states + n_cols - 1) // n_cols
+        axes = c.fig.subplots(n_rows, n_cols, squeeze=False)
+
+        for idx, (n, wf_exc) in enumerate(excited_wfs):
+            row, col = divmod(idx, n_cols)
+            ax = axes[row][col]
+            plot_wavefunction_2d(ax, wf_exc, dx, dy, nx, ny)
+            title = (
+                titles[idx]
+                if titles
+                else rf"Excited {n}: $|\psi_{n}(x_1,x_2)|^2$"
+            )
+            ax.set_title(title, fontsize=9)
+
+        for idx in range(n_states, n_rows * n_cols):
+            row, col = divmod(idx, n_cols)
+            axes[row][col].axis("off")
+
+        c.fig.tight_layout(pad=2.0)
+        c.draw()
 
 
 def main():

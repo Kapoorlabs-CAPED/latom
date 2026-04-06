@@ -45,6 +45,12 @@ class SimulationConfig:
     # Excited states
     n_excited: int = 0
     load_ground: int = 0
+    load_excited: int = (
+        0  # 0 = always compute, 1 = load from file if available
+    )
+    excited_imag_mult: int = (
+        1  # multiplier for excited state imag steps; state N gets N × mult × imag_steps
+    )
 
     # Autoionizing mode (Feit-Fleck-Steiger spectral method)
     auto_mode: int = 0
@@ -54,6 +60,9 @@ class SimulationConfig:
     # Kick mode (linear response spectrum)
     kick_mode: int = 0
     kick_strength: float = 0.01
+
+    # Real-time initial state: 0 = ground state, N = excited state N
+    laser_init_state: int = 0
 
     # Output file names
     output_dir: str = "res"

@@ -34,6 +34,9 @@ static double cfg_auto_target_energy = 0.0;  // Target energy for spectral proje
 static char   cfg_auto_input_wf[512] = "";   // Input wavefunction file for auto mode
 static int    cfg_kick_mode = 0;         // Linear response kick mode
 static double cfg_kick_strength = 0.01;  // Kick strength A_0 (velocity gauge impulse)
+static int    cfg_laser_init_state = 0;  // 0 = ground state, N = excited state N
+static int    cfg_load_excited = 0;      // 0 = always compute, 1 = load from file if available
+static int    cfg_excited_imag_mult = 1;  // multiplier for excited state imag steps; state N gets N * mult * imag_steps
 static char   cfg_output_dir[512] = "res";
 static char   cfg_wf_file[512] = "wf_laser.dat";
 static char   cfg_obser_file[512] = "obser_laser.dat";
@@ -80,6 +83,9 @@ static void read_config(const char* filename)
       else if (strcmp(key, "auto_input_wf") == 0) snprintf(cfg_auto_input_wf, sizeof(cfg_auto_input_wf), "%s", value);
       else if (strcmp(key, "kick_mode") == 0) cfg_kick_mode = atoi(value);
       else if (strcmp(key, "kick_strength") == 0) cfg_kick_strength = atof(value);
+      else if (strcmp(key, "laser_init_state") == 0) cfg_laser_init_state = atoi(value);
+      else if (strcmp(key, "load_excited") == 0) cfg_load_excited = atoi(value);
+      else if (strcmp(key, "excited_imag_mult") == 0) cfg_excited_imag_mult = atoi(value);
       else if (strcmp(key, "output_dir") == 0) snprintf(cfg_output_dir, sizeof(cfg_output_dir), "%s", value);
       else if (strcmp(key, "wf_file") == 0) snprintf(cfg_wf_file, sizeof(cfg_wf_file), "%s", value);
       else if (strcmp(key, "obser_file") == 0) snprintf(cfg_obser_file, sizeof(cfg_obser_file), "%s", value);
@@ -273,23 +279,26 @@ int main(int argc, char **argv)
         {
           cout << "\n===== Computing excited state " << n_exc << " =====" << endl;
 
-          // Check if this excited state can be loaded from file
           char excited_file[1024];
           snprintf(excited_file, sizeof(excited_file), "%s/wf_excited_%d.dat", cfg_output_dir, n_exc);
-          FILE* f_load = fopen(excited_file, "r");
 
           wavefunction wf_exc(total_size);
 
-          if (f_load)
+          if (cfg_load_excited)
             {
-              // Load from file
-              cout << "Loading excited state " << n_exc << " from " << excited_file << endl;
-              wf_exc.init(g, 99, 0.1, 0.0, 0.0, f_load, 0);
-              fclose(f_load);
-              wf_exc *= 1.0 / sqrt(wf_exc.norm(g));
+              FILE* f_load = fopen(excited_file, "r");
+              if (f_load)
+                {
+                  cout << "Loading excited state " << n_exc << " from " << excited_file << endl;
+                  wf_exc.init(g, 99, 0.1, 0.0, 0.0, f_load, 0);
+                  fclose(f_load);
+                  wf_exc *= 1.0 / sqrt(wf_exc.norm(g));
+                  converged[n_exc] = wf_exc;
+                  continue;
+                }
             }
-          else
-            {
+
+          {
               // Compute via imaginary time propagation + Gram-Schmidt
               wf_exc.init(g, 3, 2.0 + n_exc, 0.0, 0.0);  // different seed per state
               wf_exc *= 1.0 / sqrt(wf_exc.norm(g));
@@ -301,7 +310,13 @@ int main(int argc, char **argv)
 
               complex<double> exc_energy;
 
-              for (long ts_exc = 0; ts_exc < no_of_imag_timesteps; ts_exc++)
+              // Higher excited states need more steps to converge:
+              // state N gets N * multiplier * imag_steps
+              long exc_steps = (long)n_exc * cfg_excited_imag_mult * no_of_imag_timesteps;
+              cout << "Excited state " << n_exc << ": running " << exc_steps
+                   << " imaginary time steps" << endl;
+
+              for (long ts_exc = 0; ts_exc < exc_steps; ts_exc++)
                 {
                   timestep = complex<double>(0.0, -1.0 * imag_timestep);
 
@@ -347,6 +362,28 @@ int main(int argc, char **argv)
         }
 
       delete[] converged;
+    }
+
+  // Set initial state for real-time propagation
+  if (cfg_laser_init_state > 0)
+    {
+      char excited_file[1024];
+      snprintf(excited_file, sizeof(excited_file), "%s/wf_excited_%d.dat",
+               cfg_output_dir, cfg_laser_init_state);
+      FILE* f_init = fopen(excited_file, "r");
+      if (f_init)
+        {
+          wf.init(g, 99, 0.1, 0.0, 0.0, f_init, 0);
+          fclose(f_init);
+          wf *= 1.0 / sqrt(wf.norm(g));
+          cout << "Real-time propagation starting from excited state "
+               << cfg_laser_init_state << endl;
+        }
+      else
+        {
+          cerr << "ERROR: cannot open " << excited_file
+               << " for laser initial state. Falling back to ground state." << endl;
+        }
     }
 
   wfini=wf;
