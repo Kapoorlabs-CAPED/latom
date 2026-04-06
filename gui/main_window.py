@@ -70,6 +70,8 @@ class MainWindow(QMainWindow):
         self._poll_timer = QTimer(self)
         self._poll_timer.timeout.connect(self._poll_outputs)
 
+        self._wf_snapshots = []  # list of (timestep, path) tuples found so far
+        self._wf_snap_idx = -1  # index into _wf_snapshots currently displayed
         self._setup_ui()
         self._update_build_status()
 
@@ -124,12 +126,38 @@ class MainWindow(QMainWindow):
             "Vector Potential",
             "Spectrum",
             "1D Density",
+            "Live WF",
         ]
         for name in tab_names:
-            # "Excited States" manages its own subplot grid — no default axes
-            canvas = PlotCanvas(single_axes=(name != "Excited States"))
-            self._canvases[name] = canvas
-            self.tabs.addTab(canvas, name)
+            if name == "Live WF":
+                # Live WF tab: canvas + prev/next scroll buttons
+                container = QWidget()
+                vbox = QVBoxLayout(container)
+                vbox.setContentsMargins(0, 0, 0, 0)
+                canvas = PlotCanvas()
+                self._canvases[name] = canvas
+                vbox.addWidget(canvas, stretch=1)
+
+                nav_row = QWidget()
+                nav_layout = QHBoxLayout(nav_row)
+                nav_layout.setContentsMargins(4, 2, 4, 2)
+                self._btn_wf_prev = QPushButton("◀ Prev")
+                self._btn_wf_prev.clicked.connect(self._on_wf_prev)
+                self._btn_wf_next = QPushButton("Next ▶")
+                self._btn_wf_next.clicked.connect(self._on_wf_next)
+                self._lbl_wf_snap = QLabel("No snapshots yet")
+                self._lbl_wf_snap.setAlignment(Qt.AlignCenter)
+                nav_layout.addWidget(self._btn_wf_prev)
+                nav_layout.addWidget(self._lbl_wf_snap, stretch=1)
+                nav_layout.addWidget(self._btn_wf_next)
+                vbox.addWidget(nav_row)
+
+                self.tabs.addTab(container, name)
+            else:
+                # "Excited States" manages its own subplot grid — no default axes
+                canvas = PlotCanvas(single_axes=(name != "Excited States"))
+                self._canvases[name] = canvas
+                self.tabs.addTab(canvas, name)
 
         splitter.addWidget(self.tabs)
         splitter.setSizes([340, 860])
@@ -495,6 +523,9 @@ class MainWindow(QMainWindow):
         self._collect_config()
         self.work_dir.mkdir(parents=True, exist_ok=True)
 
+        self._wf_snapshots = []
+        self._wf_snap_idx = -1
+        self._lbl_wf_snap.setText("Waiting for snapshots...")
         self.btn_run.setEnabled(False)
         self.btn_stop.setEnabled(True)
         self._log("Starting simulation...")
@@ -591,6 +622,38 @@ class MainWindow(QMainWindow):
                 func(c.axes)
                 c.clear_and_draw()
 
+        # Live WF: check for new snapshots, auto-advance to latest
+        snapshots = find_wf_snapshots(out)
+        if len(snapshots) > len(self._wf_snapshots):
+            self._wf_snapshots = snapshots
+            self._wf_snap_idx = len(snapshots) - 1  # jump to latest
+            self._show_wf_snapshot(self._wf_snap_idx)
+
+    def _show_wf_snapshot(self, idx):
+        """Render snapshot at index idx into the Live WF canvas."""
+        if not self._wf_snapshots:
+            return
+        idx = max(0, min(idx, len(self._wf_snapshots) - 1))
+        self._wf_snap_idx = idx
+        ts, path = self._wf_snapshots[idx]
+        nx, ny = self.config.grid_nx, self.config.grid_ny
+        dx, dy = self.config.grid_dx, self.config.grid_dy
+        wf = parse_wavefunction(path, nx, ny)
+        c = self._canvases["Live WF"]
+        plot_wavefunction_2d(c.axes, wf, dx, dy, nx, ny)
+        label = "final" if ts == -1 else f"step {ts}"
+        c.axes.set_title(rf"$|\psi(x_1,x_2)|^2$ — {label}")
+        c.clear_and_draw()
+        self._lbl_wf_snap.setText(
+            f"Snapshot {idx + 1} / {len(self._wf_snapshots)}  ({label})"
+        )
+
+    def _on_wf_prev(self):
+        self._show_wf_snapshot(self._wf_snap_idx - 1)
+
+    def _on_wf_next(self):
+        self._show_wf_snapshot(self._wf_snap_idx + 1)
+
     def _refresh_all_plots(self):
         """Refresh all plots from output files."""
         out = self._get_output_dir()
@@ -638,12 +701,17 @@ class MainWindow(QMainWindow):
         plot_spectrum(c.axes, real_data)
         c.clear_and_draw()
 
-        # 1D Density from latest real-time wf snapshot or final
+        # 1D Density and Live WF from real-time snapshots
         snapshots = find_wf_snapshots(out)
         wf_latest = None
         if snapshots:
             _, last_path = snapshots[-1]
             wf_latest = parse_wavefunction(last_path, nx, ny)
+            # Populate snapshot browser if not already done
+            if len(snapshots) != len(self._wf_snapshots):
+                self._wf_snapshots = snapshots
+                self._wf_snap_idx = len(snapshots) - 1
+            self._show_wf_snapshot(self._wf_snap_idx)
 
         c = self._canvases["1D Density"]
         plot_density_1d(c.axes, wf_latest, dx, dy, nx, ny)
