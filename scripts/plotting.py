@@ -18,6 +18,48 @@ import matplotlib.pyplot as plt
 import numpy as np
 
 
+def plot_imag_convergence(ax, ground_data, excited_data_list=None):
+    """Plot imaginary time energy convergence for ground and excited states.
+
+    Args:
+        ax: Matplotlib Axes object.
+        ground_data: DataFrame from parse_imag_observables for ground state.
+        excited_data_list: List of (n, DataFrame) tuples for excited states.
+    """
+    ax.clear()
+    colors = ["b", "r", "g", "m", "c", "orange", "purple", "brown"]
+
+    if ground_data is not None:
+        x = (
+            ground_data["step"].values
+            if "step" in ground_data.columns
+            else np.arange(len(ground_data))
+        )
+        e = ground_data["energy_real"].values
+        if len(x) > 0 and len(e) > 0:
+            ax.plot(x, e, color=colors[0], linewidth=0.8, label="Ground state")
+
+    if excited_data_list:
+        for n, data in excited_data_list:
+            if data is None:
+                continue
+            x = (
+                data["step"].values
+                if "step" in data.columns
+                else np.arange(len(data))
+            )
+            e = data["energy_real"].values
+            if len(x) > 0 and len(e) > 0:
+                color = colors[n % len(colors)]
+                ax.plot(x, e, color=color, linewidth=0.8, label=f"Excited {n}")
+
+    ax.set_xlabel("Imaginary time step")
+    ax.set_ylabel("Energy (a.u.)")
+    ax.set_title("Imaginary Time Convergence")
+    ax.legend(fontsize=8)
+    ax.grid(True, alpha=0.3)
+
+
 def plot_energy_vs_time(ax, data, phase="real"):
     """Plot energy vs time from observable data.
 
@@ -304,21 +346,16 @@ def plot_spectrum(ax, data, dt=None):
     # FFT
     spectrum = np.abs(np.fft.rfft(accel_windowed)) ** 2
     freqs = np.fft.rfftfreq(len(accel_windowed), d=dt)
-
-    # Convert to harmonic order (freq / laser_freq)
-    # Use fundamental from the data if possible
-    omega0 = 1.556  # default laser frequency in a.u.
-
-    harmonics = freqs * 2.0 * np.pi / omega0
+    omega = freqs * 2.0 * np.pi  # angular frequency in a.u.
 
     # Plot on log scale
     spectrum = np.clip(spectrum, 1e-30, None)
-    ax.semilogy(harmonics, spectrum, "b-", linewidth=0.5)
+    ax.semilogy(omega, spectrum, "b-", linewidth=0.5)
 
-    ax.set_xlabel("Harmonic Order")
-    ax.set_ylabel(r"$|d(\omega)|^2$ (arb. units)")
-    ax.set_title("High Harmonic Generation Spectrum")
-    ax.set_xlim(0, min(60, harmonics[-1]))
+    ax.set_xlabel(r"$\omega$ (a.u.)")
+    ax.set_ylabel(r"$|\ddot{d}(\omega)|^2$ (arb. units)")
+    ax.set_title("Dipole Acceleration Spectrum")
+    ax.set_xlim(0, omega[-1])
     ax.grid(True, alpha=0.3)
 
 

@@ -23,6 +23,7 @@ from plotting import (  # noqa: E402
     plot_density_1d,
     plot_dipole,
     plot_energy_vs_time,
+    plot_imag_convergence,
     plot_ionization,
     plot_spectrum,
     plot_vector_potential,
@@ -353,21 +354,35 @@ class MainWindow(QMainWindow):
         btn_layout4 = QHBoxLayout(btn_row4)
         btn_layout4.setContentsMargins(0, 0, 0, 0)
 
+        btn_save_current = QPushButton("Save Current Plot...")
+        btn_save_current.clicked.connect(self._on_save_current_plot)
+        btn_layout4.addWidget(btn_save_current)
+
+        btn_save_all = QPushButton("Save All Plots...")
+        btn_save_all.clicked.connect(self._on_save_all_plots)
+        btn_layout4.addWidget(btn_save_all)
+
+        lay.addWidget(btn_row4)
+
+        btn_row5 = QWidget()
+        btn_layout5 = QHBoxLayout(btn_row5)
+        btn_layout5.setContentsMargins(0, 0, 0, 0)
+
         btn_load_exc = QPushButton("Load Excited States from File")
         btn_load_exc.clicked.connect(self._on_load_excited_states)
         btn_load_exc.setToolTip(
             "Scan output directory for wf_excited_N.dat files and display them."
         )
-        btn_layout4.addWidget(btn_load_exc)
+        btn_layout5.addWidget(btn_load_exc)
 
         btn_load_exc_pick = QPushButton("Load Single Excited State...")
         btn_load_exc_pick.clicked.connect(self._on_load_excited_state_pick)
         btn_load_exc_pick.setToolTip(
             "Pick a specific wf_excited_N.dat file to load and display."
         )
-        btn_layout4.addWidget(btn_load_exc_pick)
+        btn_layout5.addWidget(btn_load_exc_pick)
 
-        lay.addWidget(btn_row4)
+        lay.addWidget(btn_row5)
         return grp
 
     # ------------------------------------------------------------ Actions
@@ -531,16 +546,30 @@ class MainWindow(QMainWindow):
     def _get_output_dir(self):
         return self.work_dir / self.config.output_dir
 
+    def _load_excited_imag_data(self, out):
+        """Load imaginary time convergence data for all excited states."""
+        excited_imag = []
+        for n in range(1, 21):
+            f = out / f"obserimag_excited_{n}.dat"
+            if f.is_file():
+                data = parse_imag_observables(f)
+                if data is not None:
+                    excited_imag.append((n, data))
+            else:
+                break
+        return excited_imag
+
     def _poll_outputs(self):
         """Poll observable files and update live plots."""
         out = self._get_output_dir()
 
         imag_data = parse_imag_observables(out / self.config.obser_imag_file)
         real_data = parse_real_observables(out / self.config.obser_file)
+        excited_imag = self._load_excited_imag_data(out)
 
-        if imag_data is not None:
+        if imag_data is not None or excited_imag:
             c = self._canvases["Energy (Imag)"]
-            plot_energy_vs_time(c.axes, imag_data, phase="imag")
+            plot_imag_convergence(c.axes, imag_data, excited_imag)
             c.clear_and_draw()
 
         if real_data is not None:
@@ -572,10 +601,11 @@ class MainWindow(QMainWindow):
 
         imag_data = parse_imag_observables(out / self.config.obser_imag_file)
         real_data = parse_real_observables(out / self.config.obser_file)
+        excited_imag = self._load_excited_imag_data(out)
 
-        # Imag energy
+        # Imag energy — ground state + all excited states
         c = self._canvases["Energy (Imag)"]
-        plot_energy_vs_time(c.axes, imag_data, phase="imag")
+        plot_imag_convergence(c.axes, imag_data, excited_imag)
         c.clear_and_draw()
 
         # Ground state wavefunction (single converged result from imag prop)
@@ -671,6 +701,49 @@ class MainWindow(QMainWindow):
                 self._log("No wavefunction snapshots found for animation.")
         except Exception as e:
             self._log(f"GIF creation failed: {e}")
+
+    def _on_save_current_plot(self):
+        """Save the currently visible tab's figure to file."""
+        tab_name = self.tabs.tabText(self.tabs.currentIndex())
+        canvas = self._canvases.get(tab_name)
+        if canvas is None:
+            self._log("No plot to save.")
+            return
+        path, _ = QFileDialog.getSaveFileName(
+            self,
+            "Save Plot",
+            f"{tab_name.replace(' ', '_')}.png",
+            "PNG (*.png);;SVG (*.svg);;PDF (*.pdf)",
+        )
+        if path:
+            canvas.fig.savefig(path, dpi=150, bbox_inches="tight")
+            self._log(f"Saved: {path}")
+
+    def _on_save_all_plots(self):
+        """Save all plot figures to a chosen directory."""
+        directory = QFileDialog.getExistingDirectory(
+            self, "Select output directory"
+        )
+        if not directory:
+            return
+        fmt, _ = QFileDialog.getSaveFileName(
+            self,
+            "Choose format (enter any filename with .png/.svg/.pdf)",
+            "plots.png",
+            "PNG (*.png);;SVG (*.svg);;PDF (*.pdf)",
+        )
+        ext = Path(fmt).suffix if fmt else ".png"
+        saved = 0
+        for name, canvas in self._canvases.items():
+            fname = Path(directory) / (
+                name.replace(" ", "_").replace("/", "-") + ext
+            )
+            try:
+                canvas.fig.savefig(str(fname), dpi=150, bbox_inches="tight")
+                saved += 1
+            except Exception as e:
+                self._log(f"Could not save {name}: {e}")
+        self._log(f"Saved {saved} plots to {directory}")
 
     def _on_load_excited_states(self):
         """Scan output directory for wf_excited_N.dat files and display them."""
