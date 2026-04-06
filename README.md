@@ -26,6 +26,56 @@ This gives the first N spin-singlet eigenstates of the Hamiltonian.
 
 The converged ground state is propagated in real time under an external laser field in the **velocity gauge**. The vector potential A(t) couples to the electrons via the A*p term in the kinetic energy. The code records observables at each timestep and dumps wavefunction snapshots at configurable intervals.
 
+### Autoionizing state extraction (Feit-Fleck-Steiger method)
+
+Extracts doubly-excited autoionizing states embedded in the continuum using the spectral method of Feit, Fleck, and Steiger. The idea:
+
+1. Start from a converged bound state (ground or excited)
+2. Propagate in real time with **zero laser field** (field-free evolution)
+3. At each timestep, accumulate the Fourier projection at the target energy E:
+   ```
+   psi_proj(T) = integral_0^T  W(t) * exp(i*E*t) * psi(t) dt
+   ```
+4. The Hann window W(t) = 0.5*(1 - cos(2*pi*t/T)) suppresses spectral leakage
+5. After propagation, normalize psi_proj to obtain the eigenstate at energy E
+
+This method can resolve autoionizing resonances that are inaccessible via imaginary time propagation because they lie above the single-ionization threshold. It also works for any excited state whose energy is known (e.g., from a linear response spectrum — see below).
+
+Enable with `auto_mode = 1` and set `auto_target_energy` to the desired energy in atomic units.
+
+### Linear response spectrum (kick mode)
+
+Computes the absorption spectrum of the system by applying a velocity-gauge impulse ("kick") and analyzing the subsequent field-free dynamics:
+
+1. Converge the ground state via imaginary time propagation
+2. Apply a constant vector potential A(t) = A_0 (equivalent to a Dirac delta E-field kick)
+3. Propagate in real time — the constant A couples to both electrons via A*p
+4. Record the dipole d(t) = <x1>(t) + <x2>(t) at each timestep
+5. Fourier transform d(t) to obtain the absorption spectrum |d(omega)|^2
+
+Peaks in the spectrum appear at transition frequencies omega_n = E_n - E_0. Adding the ground state energy E_0 to each peak gives the absolute energy of the excited state. These energies can then be used as `auto_target_energy` to extract the corresponding wavefunctions via the Feit-Fleck-Steiger method.
+
+Enable with `kick_mode = 1` and set `kick_strength` to a small value (default 0.01 a.u.) to stay in the linear response regime.
+
+### 1D Helium energy levels (soft-Coulomb, eps=1.0)
+
+Reference values for the 1D model Helium atom with soft-Coulomb potentials (from [Kapoor, Phys. Rev. A 93, 063408, 2016](https://doi.org/10.1103/PhysRevA.93.063408)):
+
+| State | Energy (a.u.) | Energy (eV) | Notes |
+|-------|--------------|-------------|-------|
+| Ground state (1s^2) | -2.238 | -60.90 | Spin-singlet, obtainable via imaginary time |
+| First excited singlet | -1.705 | -46.40 | Via Gram-Schmidt or auto mode |
+| He+ threshold | -0.884 | -24.06 | Single ionization threshold |
+| AI_1 (autoionizing) | -0.884 | -24.06 | Lowest doubly-excited, just above He+ threshold |
+| AI_2 (autoionizing) | -0.816 | -22.20 | Second doubly-excited state |
+| AI_3 (autoionizing) | -0.538 | -14.64 | Above second ionization threshold |
+
+**Workflow for autoionizing states:**
+1. Run imaginary time to get ground state at E_0 = -2.238 a.u.
+2. Run kick mode to get absorption spectrum
+3. Identify peak at omega_n, compute E_n = E_0 + omega_n
+4. Run auto mode with `auto_target_energy = E_n`
+
 ### Crank-Nicolson split-operator scheme
 
 The 2D Hamiltonian is split into x- and y-direction kinetic operators, single-particle potentials, and the electron-electron interaction. Each direction is solved implicitly via tridiagonal matrix inversion (Thomas algorithm). The interaction potential exp(-i*dt*V_ee) is applied as a multiplicative phase.
@@ -223,6 +273,11 @@ All parameters can be set via the GUI or a JSON config file. Key parameters:
 | load_ground | 0 | Load ground state from file (1) or compute (0) |
 | coulomb_eps | 1.0 | Coulomb softening parameter |
 | absorb_ampl | 50.0 | Absorbing boundary strength |
+| auto_mode | 0 | Enable autoionizing mode (Feit-Fleck-Steiger) |
+| auto_target_energy | 0.0 | Target energy for spectral projection (a.u.) |
+| auto_input_wf | "" | Input wavefunction file for auto mode |
+| kick_mode | 0 | Enable kick mode (linear response spectrum) |
+| kick_strength | 0.01 | Kick amplitude A_0 (a.u.) |
 
 ## Project structure
 

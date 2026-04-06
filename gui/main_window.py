@@ -240,6 +240,36 @@ class MainWindow(QMainWindow):
         self.chk_load_ground = QCheckBox("Load ground state from file")
         self.chk_load_ground.setChecked(bool(self.config.load_ground))
         lay.addWidget(self.chk_load_ground)
+
+        # Autoionizing mode (Feit-Fleck-Steiger)
+        self.chk_auto_mode = QCheckBox(
+            "Autoionizing mode (Feit-Fleck-Steiger)"
+        )
+        self.chk_auto_mode.setChecked(bool(self.config.auto_mode))
+        lay.addWidget(self.chk_auto_mode)
+        r, self.spin_auto_target_energy = self._make_spin(
+            "Target energy (a.u.)",
+            -10.0,
+            10.0,
+            self.config.auto_target_energy,
+            is_float=True,
+            decimals=4,
+        )
+        lay.addWidget(r)
+
+        # Kick mode (linear response)
+        self.chk_kick_mode = QCheckBox("Kick mode (linear response spectrum)")
+        self.chk_kick_mode.setChecked(bool(self.config.kick_mode))
+        lay.addWidget(self.chk_kick_mode)
+        r, self.spin_kick_strength = self._make_spin(
+            "Kick strength A_0",
+            0.0,
+            1.0,
+            self.config.kick_strength,
+            is_float=True,
+            decimals=4,
+        )
+        lay.addWidget(r)
         return grp
 
     def _make_controls_group(self):
@@ -332,6 +362,10 @@ class MainWindow(QMainWindow):
             ionization_box=self.spin_box.value(),
             n_excited=self.spin_n_excited.value(),
             load_ground=1 if self.chk_load_ground.isChecked() else 0,
+            auto_mode=1 if self.chk_auto_mode.isChecked() else 0,
+            auto_target_energy=self.spin_auto_target_energy.value(),
+            kick_mode=1 if self.chk_kick_mode.isChecked() else 0,
+            kick_strength=self.spin_kick_strength.value(),
         )
 
     def _populate_spins(self):
@@ -352,6 +386,10 @@ class MainWindow(QMainWindow):
         self.spin_box.setValue(self.config.ionization_box)
         self.spin_n_excited.setValue(self.config.n_excited)
         self.chk_load_ground.setChecked(bool(self.config.load_ground))
+        self.chk_auto_mode.setChecked(bool(self.config.auto_mode))
+        self.spin_auto_target_energy.setValue(self.config.auto_target_energy)
+        self.chk_kick_mode.setChecked(bool(self.config.kick_mode))
+        self.spin_kick_strength.setValue(self.config.kick_strength)
 
     # ---- Build ----
 

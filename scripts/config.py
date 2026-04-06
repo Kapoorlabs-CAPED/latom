@@ -46,6 +46,15 @@ class SimulationConfig:
     n_excited: int = 0
     load_ground: int = 0
 
+    # Autoionizing mode (Feit-Fleck-Steiger spectral method)
+    auto_mode: int = 0
+    auto_target_energy: float = 0.0
+    auto_input_wf: str = ""
+
+    # Kick mode (linear response spectrum)
+    kick_mode: int = 0
+    kick_strength: float = 0.01
+
     # Output file names
     output_dir: str = "res"
     wf_file: str = "wf_laser.dat"

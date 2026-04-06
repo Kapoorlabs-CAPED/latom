@@ -29,6 +29,11 @@ static double cfg_coulomb_eps = 1.0;
 static double cfg_absorb_ampl = 50.0;
 static int    cfg_n_excited = 0;
 static int    cfg_load_ground = 0;
+static int    cfg_auto_mode = 0;         // Feit-Fleck-Steiger autoionizing state extraction
+static double cfg_auto_target_energy = 0.0;  // Target energy for spectral projection
+static char   cfg_auto_input_wf[512] = "";   // Input wavefunction file for auto mode
+static int    cfg_kick_mode = 0;         // Linear response kick mode
+static double cfg_kick_strength = 0.01;  // Kick strength A_0 (velocity gauge impulse)
 static char   cfg_output_dir[512] = "res";
 static char   cfg_wf_file[512] = "wf_laser.dat";
 static char   cfg_obser_file[512] = "obser_laser.dat";
@@ -70,6 +75,11 @@ static void read_config(const char* filename)
       else if (strcmp(key, "absorb_ampl") == 0) cfg_absorb_ampl = atof(value);
       else if (strcmp(key, "n_excited") == 0)  cfg_n_excited = atoi(value);
       else if (strcmp(key, "load_ground") == 0) cfg_load_ground = atoi(value);
+      else if (strcmp(key, "auto_mode") == 0) cfg_auto_mode = atoi(value);
+      else if (strcmp(key, "auto_target_energy") == 0) cfg_auto_target_energy = atof(value);
+      else if (strcmp(key, "auto_input_wf") == 0) snprintf(cfg_auto_input_wf, sizeof(cfg_auto_input_wf), "%s", value);
+      else if (strcmp(key, "kick_mode") == 0) cfg_kick_mode = atoi(value);
+      else if (strcmp(key, "kick_strength") == 0) cfg_kick_strength = atof(value);
       else if (strcmp(key, "output_dir") == 0) snprintf(cfg_output_dir, sizeof(cfg_output_dir), "%s", value);
       else if (strcmp(key, "wf_file") == 0) snprintf(cfg_wf_file, sizeof(cfg_wf_file), "%s", value);
       else if (strcmp(key, "obser_file") == 0) snprintf(cfg_obser_file, sizeof(cfg_obser_file), "%s", value);
@@ -353,51 +363,175 @@ int main(int argc, char **argv)
 
   long wf_snap_count = 0;
 
-  for (ts=0; ts<no_of_timesteps; ts++)
+  if (cfg_auto_mode)
     {
-      counter_i++;
-      counter_ii++;
-      time=real(timestep*(complex<double>)(ts));
-      cout << "Real: " << ts << "  " << " Expectation value x : " << wf.expect_x(g) << " " << " Energy " << real(complenerg) << " " << endl;
+      // ============= Autoionizing mode (Feit-Fleck-Steiger) =============
+      //
+      // Extracts the eigenstate at a target energy by accumulating the
+      // Fourier component:
+      //   wf_proj(T) = integral_0^T  W(t) * exp(i*E_target*t) * psi(t) dt
+      //
+      // where W(t) = 0.5*(1 - cos(2*pi*t/T)) is a Hann window.
+      // The laser field is zero — pure field-free propagation.
+      // After accumulation, wf_proj is normalized to give the eigenstate.
 
-      wf.propagate(timestep, time, g, hamilton, me, vecpotflag, staticpot_x, staticpot_y, staticpot_xy, charge);
+      cout << "\n===== Autoionizing mode: Feit-Fleck-Steiger spectral method =====" << endl;
+      cout << "Target energy: " << cfg_auto_target_energy << " a.u." << endl;
 
-      if (counter_ii==obs_output_every)
+      // Load input wavefunction if specified
+      if (strlen(cfg_auto_input_wf) > 0) {
+        char auto_input_path[1024];
+        snprintf(auto_input_path, sizeof(auto_input_path), "%s/%s", cfg_output_dir, cfg_auto_input_wf);
+        FILE* f_auto = fopen(auto_input_path, "r");
+        if (f_auto) {
+          wf.init(g, 99, 0.1, 0.0, 0.0, f_auto, 0);
+          fclose(f_auto);
+          wf *= 1.0 / sqrt(wf.norm(g));
+          cout << "Loaded input wavefunction from " << auto_input_path << endl;
+        } else {
+          cerr << "ERROR: cannot open auto_input_wf: " << auto_input_path << endl;
+          return 1;
+        }
+      }
+
+      // Accumulator wavefunction for the spectral projection
+      long total_size = g.ngps_x() * g.ngps_y() * g.ngps_z();
+      wavefunction wf_proj(total_size);
+      wf_proj.nullify();
+
+      double T_total = no_of_timesteps * real_timestep;
+      double norm_proj;
+
+      for (ts=0; ts<no_of_timesteps; ts++)
         {
-          complenerg=wf.energy(0.0, g, hamilton, me, masses, staticpot_x, staticpot_y, staticpot_xy, charge);
+          counter_i++;
+          counter_ii++;
+          time = real_timestep * (double)ts;
 
-          groundstatepop=wf*wfini*g.delt_x()*g.delt_y();
+          // Propagate with zero laser field (vecpotflag still set, but
+          // the accumulation uses the field-free evolution)
+          wf.propagate(timestep, time, g, hamilton, me, 0, staticpot_x, staticpot_y, staticpot_xy, charge);
 
-          fprintf(file_obser," %.14le %.14le %.14le %.14le %.14le  %.14le  %.14le %.14le\n ",
-                  (time+real(timestep)), real(complenerg), imag(complenerg), wf.norm(g), wf.expect_x(g), wf.expect_y(g), hamilton.vecpot_x(time,me), real(conj(groundstatepop)*groundstatepop));
-          fflush(file_obser);
+          // Hann window
+          double window = 0.5 * (1.0 - cos(2.0 * M_PI * time / T_total));
 
-          counter_ii=0;
+          // Accumulate: wf_proj += W(t) * dt * exp(i*E*t) * wf(t)
+          complex<double> phase = exp(imagi * time * cfg_auto_target_energy);
+          wf_proj = wf_proj + (window * real_timestep * phase) * wf;
+
+          norm_proj = wf_proj.norm(g);
+
+          // Compute energy of the projection so far (unnormalized)
+          if (counter_ii == obs_output_every && norm_proj > 1e-30)
+            {
+              complenerg = wf_proj.energy(0.0, g, hamilton, me, masses,
+                                          staticpot_x, staticpot_y, staticpot_xy, charge) / norm_proj;
+
+              fprintf(file_obser, " %.14le %.14le %.14le %.14le %.14le  %.14le  %.14le %.14le\n ",
+                      time + real_timestep, real(complenerg), imag(complenerg),
+                      norm_proj, wf_proj.expect_x(g) / norm_proj,
+                      wf_proj.expect_y(g) / norm_proj, 0.0, norm_proj);
+              fflush(file_obser);
+
+              cout << "Auto: " << ts << "  energy: " << real(complenerg)
+                   << "  norm_proj: " << norm_proj << endl;
+
+              counter_ii = 0;
+            }
+
+          // Dump projection snapshots at regular intervals
+          if (counter_i == wf_output_every)
+            {
+              snprintf(string_wfdat, sizeof(string_wfdat), "%s/wf_real_%06ld.dat", cfg_output_dir, ts);
+              // Dump the normalized projection
+              wavefunction wf_snap = wf_proj;
+              if (norm_proj > 1e-30)
+                wf_snap *= 1.0 / sqrt(norm_proj);
+              file_wfdat = fopen(string_wfdat, "w");
+              if (file_wfdat) {
+                wf_snap.dump_to_file(g, file_wfdat, dumpingstepwidth);
+                fclose(file_wfdat);
+                wf_snap_count++;
+              }
+              counter_i = 0;
+            }
+        }
+
+      // Normalize final projected state
+      wf_proj *= 1.0 / sqrt(wf_proj.norm(g));
+
+      complenerg = wf_proj.energy(0.0, g, hamilton, me, masses,
+                                  staticpot_x, staticpot_y, staticpot_xy, charge);
+      cout << "\nAutoionizing state energy: " << real(complenerg) << " a.u." << endl;
+
+      // Dump final autoionizing state
+      char auto_out[1024];
+      snprintf(auto_out, sizeof(auto_out), "%s/wf_auto.dat", cfg_output_dir);
+      file_wfdat = fopen(auto_out, "w");
+      if (file_wfdat) {
+        wf_proj.dump_to_file(g, file_wfdat, dumpingstepwidth);
+        fclose(file_wfdat);
+        cout << "Autoionizing state wavefunction written to " << auto_out << endl;
+      }
+
+      // Also dump as final
+      snprintf(string_wfdat, sizeof(string_wfdat), "%s/wf_real_final.dat", cfg_output_dir);
+      file_wfdat = fopen(string_wfdat, "w");
+      if (file_wfdat) {
+        wf_proj.dump_to_file(g, file_wfdat, dumpingstepwidth);
+        fclose(file_wfdat);
+      }
+    }
+  else
+    {
+      // ============= Normal real time propagation with laser =============
+
+      for (ts=0; ts<no_of_timesteps; ts++)
+        {
+          counter_i++;
+          counter_ii++;
+          time=real(timestep*(complex<double>)(ts));
+          cout << "Real: " << ts << "  " << " Expectation value x : " << wf.expect_x(g) << " " << " Energy " << real(complenerg) << " " << endl;
+
+          wf.propagate(timestep, time, g, hamilton, me, vecpotflag, staticpot_x, staticpot_y, staticpot_xy, charge);
+
+          if (counter_ii==obs_output_every)
+            {
+              complenerg=wf.energy(0.0, g, hamilton, me, masses, staticpot_x, staticpot_y, staticpot_xy, charge);
+
+              groundstatepop=wf*wfini*g.delt_x()*g.delt_y();
+
+              fprintf(file_obser," %.14le %.14le %.14le %.14le %.14le  %.14le  %.14le %.14le\n ",
+                      (time+real(timestep)), real(complenerg), imag(complenerg), wf.norm(g), wf.expect_x(g), wf.expect_y(g), hamilton.vecpot_x(time,me), real(conj(groundstatepop)*groundstatepop));
+              fflush(file_obser);
+
+              counter_ii=0;
+            };
+
+          // Dump wavefunction snapshots at regular intervals
+          if (counter_i==wf_output_every)
+            {
+              snprintf(string_wfdat, sizeof(string_wfdat), "%s/wf_real_%06ld.dat", cfg_output_dir, ts);
+              file_wfdat = fopen(string_wfdat, "w");
+              if (file_wfdat) {
+                wf.dump_to_file(g, file_wfdat, dumpingstepwidth);
+                fclose(file_wfdat);
+                wf_snap_count++;
+                cout << "Wavefunction snapshot " << wf_snap_count << " written to " << string_wfdat << endl;
+              }
+              counter_i=0;
+            };
         };
 
-      // Dump wavefunction snapshots at regular intervals
-      if (counter_i==wf_output_every)
-        {
-          snprintf(string_wfdat, sizeof(string_wfdat), "%s/wf_real_%06ld.dat", cfg_output_dir, ts);
-          file_wfdat = fopen(string_wfdat, "w");
-          if (file_wfdat) {
-            wf.dump_to_file(g, file_wfdat, dumpingstepwidth);
-            fclose(file_wfdat);
-            wf_snap_count++;
-            cout << "Wavefunction snapshot " << wf_snap_count << " written to " << string_wfdat << endl;
-          }
-          counter_i=0;
-        };
-    };
-
-  // Dump final wavefunction
-  snprintf(string_wfdat, sizeof(string_wfdat), "%s/wf_real_final.dat", cfg_output_dir);
-  file_wfdat = fopen(string_wfdat, "w");
-  if (file_wfdat) {
-    wf.dump_to_file(g, file_wfdat, dumpingstepwidth);
-    fclose(file_wfdat);
-    cout << "Final wavefunction written to " << string_wfdat << endl;
-  }
+      // Dump final wavefunction
+      snprintf(string_wfdat, sizeof(string_wfdat), "%s/wf_real_final.dat", cfg_output_dir);
+      file_wfdat = fopen(string_wfdat, "w");
+      if (file_wfdat) {
+        wf.dump_to_file(g, file_wfdat, dumpingstepwidth);
+        fclose(file_wfdat);
+        cout << "Final wavefunction written to " << string_wfdat << endl;
+      }
+    }
 
   fclose(file_obser);
 
@@ -409,6 +543,12 @@ int main(int argc, char **argv)
 
 double vecpot_x(double time, int me)
 {
+  // Kick mode: constant A(t) = A_0 (Dirac delta E-field)
+  if (cfg_kick_mode)
+    {
+      return cfg_kick_strength;
+    }
+
   double result=0.0;
 
   double frequ = cfg_laser_freq;

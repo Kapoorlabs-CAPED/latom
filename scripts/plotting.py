@@ -70,6 +70,14 @@ def plot_wavefunction_2d(ax, wf, dx, dy, nx, ny, vmin_orders=7):
         ny: Number of grid points in y.
         vmin_orders: Orders of magnitude below max to display.
     """
+    # Remove existing colorbars before clearing (colorbars live on the figure,
+    # not the axes, so ax.clear() alone leaves them behind)
+    fig = ax.figure
+    for cb_ax in [a for a in fig.axes if a is not ax]:
+        try:
+            cb_ax.remove()
+        except Exception:
+            pass
     ax.clear()
     if wf is None:
         ax.set_title("No wavefunction data")
@@ -311,6 +319,79 @@ def plot_spectrum(ax, data, dt=None):
     ax.set_ylabel(r"$|d(\omega)|^2$ (arb. units)")
     ax.set_title("High Harmonic Generation Spectrum")
     ax.set_xlim(0, min(60, harmonics[-1]))
+    ax.grid(True, alpha=0.3)
+
+
+def plot_linear_response_spectrum(ax, data, ground_energy=None, dt=None):
+    """Plot linear response absorption spectrum from kick-mode dipole data.
+
+    Computes the FFT of the total dipole d(t) = <x1>(t) + <x2>(t).
+    Peaks appear at omega_n = E_n - E_0 (transition energies from the
+    ground state).
+
+    Args:
+        ax: Matplotlib Axes object.
+        data: DataFrame from parse_real_observables (kick mode run).
+        ground_energy: Ground state energy in a.u. If provided, x-axis
+            shows absolute energies E_n = E_0 + omega instead of omega.
+        dt: Time step. If None, computed from data.
+    """
+    ax.clear()
+    if data is None:
+        ax.set_title("No data")
+        return
+
+    t = data["time"].values
+    ex = data["expect_x"].values
+    ey = data["expect_y"].values
+
+    if len(t) < 10:
+        ax.set_title("Insufficient data for spectrum")
+        return
+
+    if dt is None:
+        dt = t[1] - t[0]
+    if dt <= 0:
+        ax.set_title("Invalid time step")
+        return
+
+    # Total dipole
+    dipole = ex + ey
+
+    # Subtract mean (DC component)
+    dipole = dipole - dipole.mean()
+
+    # Apply Hann window
+    window = np.hanning(len(dipole))
+    dipole_windowed = dipole * window
+
+    # FFT
+    spectrum = np.abs(np.fft.rfft(dipole_windowed)) ** 2
+    freqs = np.fft.rfftfreq(len(dipole_windowed), d=dt)
+    omega = freqs * 2.0 * np.pi  # angular frequency
+
+    spectrum = np.clip(spectrum, 1e-30, None)
+
+    if ground_energy is not None:
+        # Show absolute energy E_n = E_0 + omega
+        energies = ground_energy + omega
+        ax.semilogy(energies, spectrum, "b-", linewidth=0.5)
+        ax.set_xlabel("Energy (a.u.)")
+        ax.set_title("Linear Response Spectrum (absolute energies)")
+        ax.axvline(
+            x=ground_energy,
+            color="r",
+            linestyle="--",
+            alpha=0.5,
+            label=f"$E_0$ = {ground_energy:.3f}",
+        )
+        ax.legend(fontsize=8)
+    else:
+        ax.semilogy(omega, spectrum, "b-", linewidth=0.5)
+        ax.set_xlabel(r"$\omega$ (a.u.)")
+        ax.set_title("Linear Response Absorption Spectrum")
+
+    ax.set_ylabel(r"$|d(\omega)|^2$ (arb. units)")
     ax.grid(True, alpha=0.3)
 
 
