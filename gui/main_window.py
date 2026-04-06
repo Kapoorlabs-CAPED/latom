@@ -37,6 +37,7 @@ from PyQt5.QtWidgets import (  # noqa: E402
     QFileDialog,
     QGroupBox,
     QHBoxLayout,
+    QInputDialog,
     QLabel,
     QMainWindow,
     QMessageBox,
@@ -62,8 +63,8 @@ class MainWindow(QMainWindow):
         self.setMinimumSize(1200, 800)
 
         self.config = SimulationConfig()
-        self.work_dir = Path.cwd() / "latom_work"
-        self.work_dir.mkdir(parents=True, exist_ok=True)
+        self._base_dir = Path.cwd()
+        self._experiment_name = "latom_work"
 
         self._build_worker = None
         self._sim_worker = None
@@ -88,6 +89,8 @@ class MainWindow(QMainWindow):
         left = QWidget()
         left_layout = QVBoxLayout(left)
         left_layout.setContentsMargins(4, 4, 4, 4)
+
+        left_layout.addWidget(self._make_experiment_group())
 
         scroll = QScrollArea()
         scroll.setWidgetResizable(True)
@@ -130,13 +133,16 @@ class MainWindow(QMainWindow):
         ]
         for name in tab_names:
             if name == "Live WF":
-                # Live WF tab: canvas + prev/next scroll buttons
+                # Live WF tab: fixed-size square canvas + prev/next scroll buttons
                 container = QWidget()
                 vbox = QVBoxLayout(container)
                 vbox.setContentsMargins(0, 0, 0, 0)
-                canvas = PlotCanvas()
+                canvas = PlotCanvas(
+                    width=7, height=7, dpi=100, constrained=True
+                )
+                canvas.setFixedSize(700, 700)
                 self._canvases[name] = canvas
-                vbox.addWidget(canvas, stretch=1)
+                vbox.addWidget(canvas, alignment=Qt.AlignCenter)
 
                 nav_row = QWidget()
                 nav_layout = QHBoxLayout(nav_row)
@@ -185,6 +191,71 @@ class MainWindow(QMainWindow):
 
         row_layout.addWidget(spin)
         return row, spin
+
+    # ---- Experiment directory ----
+
+    @property
+    def work_dir(self):
+        return self._base_dir / self._experiment_name
+
+    def _make_experiment_group(self):
+        grp = QGroupBox("Experiment")
+        lay = QVBoxLayout(grp)
+
+        base_row = QWidget()
+        base_layout = QHBoxLayout(base_row)
+        base_layout.setContentsMargins(0, 0, 0, 0)
+        base_layout.addWidget(QLabel("Base dir:"))
+        self._edit_base_dir = QLabel(str(self._base_dir))
+        self._edit_base_dir.setStyleSheet("font-size: 10px; color: #555;")
+        self._edit_base_dir.setWordWrap(True)
+        base_layout.addWidget(self._edit_base_dir, stretch=1)
+        btn_browse = QPushButton("Browse")
+        btn_browse.setMaximumWidth(60)
+        btn_browse.clicked.connect(self._on_browse_base_dir)
+        base_layout.addWidget(btn_browse)
+        lay.addWidget(base_row)
+
+        name_row = QWidget()
+        name_layout = QHBoxLayout(name_row)
+        name_layout.setContentsMargins(0, 0, 0, 0)
+        name_layout.addWidget(QLabel("Experiment:"))
+        self._edit_exp_name = QLabel(self._experiment_name)
+        self._edit_exp_name.setStyleSheet("font-weight: bold;")
+        name_layout.addWidget(self._edit_exp_name, stretch=1)
+        btn_name = QPushButton("Rename")
+        btn_name.setMaximumWidth(60)
+        btn_name.clicked.connect(self._on_rename_experiment)
+        name_layout.addWidget(btn_name)
+        lay.addWidget(name_row)
+
+        self._lbl_work_dir = QLabel(str(self.work_dir))
+        self._lbl_work_dir.setStyleSheet("font-size: 9px; color: #777;")
+        self._lbl_work_dir.setWordWrap(True)
+        lay.addWidget(self._lbl_work_dir)
+
+        return grp
+
+    def _on_browse_base_dir(self):
+        directory = QFileDialog.getExistingDirectory(
+            self, "Select base directory", str(self._base_dir)
+        )
+        if directory:
+            self._base_dir = Path(directory)
+            self._edit_base_dir.setText(str(self._base_dir))
+            self._lbl_work_dir.setText(str(self.work_dir))
+
+    def _on_rename_experiment(self):
+        name, ok = QInputDialog.getText(
+            self,
+            "Experiment name",
+            "Enter experiment name:",
+            text=self._experiment_name,
+        )
+        if ok and name.strip():
+            self._experiment_name = name.strip()
+            self._edit_exp_name.setText(self._experiment_name)
+            self._lbl_work_dir.setText(str(self.work_dir))
 
     def _make_grid_group(self):
         grp = QGroupBox("Grid")

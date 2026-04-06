@@ -510,7 +510,7 @@ def create_wf_animation(
     x = (np.arange(nx) - nx / 2 + 0.5) * dx
     y = (np.arange(ny) - ny / 2 + 0.5) * dy
 
-    fig, ax = plt.subplots(figsize=(8, 7))
+    fig, ax = plt.subplots(figsize=(7, 7), constrained_layout=True)
 
     # Load first frame to set up the plot
     ts0, path0 = snapshots[0]
