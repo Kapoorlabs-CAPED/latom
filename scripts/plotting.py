@@ -565,6 +565,9 @@ def create_wf_animation(
         interval=1000 // fps,
     )
     anim.save(str(gif_path), writer="pillow", fps=fps)
+    anim.event_source = (
+        None  # prevent matplotlib trying to start event loop after save
+    )
     plt.close(fig)
     print(f"Animation saved to {gif_path} ({len(snapshots)} frames)")
     return len(snapshots)
