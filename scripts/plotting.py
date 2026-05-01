@@ -164,6 +164,55 @@ def plot_wavefunction_2d(ax, wf, dx, dy, nx, ny, vmin_orders=7):
     ax._latom_cbar = cbar
 
 
+def plot_ks_orbital(ax, orbital, dx, nx, title=None):
+    """Plot a 1D Kohn-Sham orbital: |phi|^2 plus real/imag parts.
+
+    Args:
+        ax: Matplotlib Axes object.
+        orbital: Complex 1D numpy array of length nx, or None.
+        dx: Grid spacing.
+        nx: Number of grid points.
+        title: Optional title.
+    """
+    ax.clear()
+    if orbital is None:
+        ax.set_title("No KS orbital data")
+        return
+    coords = (np.arange(nx) - nx / 2 + 0.5) * dx
+    n = min(nx, orbital.size)
+    coords = coords[:n]
+    phi = orbital[:n]
+    ax.plot(
+        coords,
+        np.abs(phi) ** 2,
+        "b-",
+        linewidth=1.0,
+        label=r"$|\varphi_{KS}|^2$",
+    )
+    ax.plot(
+        coords,
+        phi.real,
+        "r--",
+        linewidth=0.7,
+        alpha=0.7,
+        label=r"$\mathrm{Re}\,\varphi_{KS}$",
+    )
+    ax.plot(
+        coords,
+        phi.imag,
+        "g--",
+        linewidth=0.7,
+        alpha=0.7,
+        label=r"$\mathrm{Im}\,\varphi_{KS}$",
+    )
+    ax.set_xlabel("x (a.u.)")
+    ax.set_ylabel("KS orbital")
+    if title:
+        ax.set_title(title)
+    ax.legend(fontsize=8, loc="upper right")
+    ax.grid(True, alpha=0.3)
+
+
 def plot_density_1d(ax, wf, dx, dy, nx, ny, axis="x"):
     """Plot 1D marginal density by integrating over one dimension.
 

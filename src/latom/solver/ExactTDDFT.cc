@@ -289,14 +289,10 @@ int main(int argc, char **argv)
 
   // ============= Real-time propagation with KS reconstruction =============
   cout << "\n===== Real-time propagation =====" << endl;
-  FILE* file_wfdat        = fopen(p_wf, "w");
-  FILE* file_ks_orbital   = fopen(p_ks_orbital, "w");
-  FILE* file_realpot      = fopen(p_realpot, "w");
 
-  // Snapshot the initial wf, KS orbital
-  wf.dump_to_file(g, file_wfdat, dumpingstepwidth);
-  kohnshamorbital.dump_to_file(gone, file_ks_orbital, dumpingstepwidth);
-
+  // Per-snapshot files mirror the TDSE convention so the GUI's
+  // find_wf_snapshots / find_ks_snapshots logic can pick them up.
+  char snap_path[1024];
   complex<double> timestep(real_timestep, 0.0);
   long no_of_real = cfg_no_of_real_timesteps;
   long counter_obs = 0, counter_wf = 0;
@@ -345,21 +341,33 @@ int main(int argc, char **argv)
     }
 
     if (counter_wf == cfg_wf_output_every) {
-      wf.dump_to_file(g, file_wfdat, dumpingstepwidth);
-      kohnshamorbital.dump_to_file(gone, file_ks_orbital, dumpingstepwidth);
-      realpot.dump_to_file(gone, file_realpot, dumpingstepwidth);
+      snprintf(snap_path, sizeof(snap_path), "%s/wf_real_%06ld.dat", cfg_output_dir, ts);
+      FILE* f = fopen(snap_path, "w");
+      if (f) { wf.dump_to_file(g, f, dumpingstepwidth); fclose(f); }
+
+      snprintf(snap_path, sizeof(snap_path), "%s/ks_real_%06ld.dat", cfg_output_dir, ts);
+      f = fopen(snap_path, "w");
+      if (f) { kohnshamorbital.dump_to_file(gone, f, dumpingstepwidth); fclose(f); }
+
+      snprintf(snap_path, sizeof(snap_path), "%s/realpot_real_%06ld.dat", cfg_output_dir, ts);
+      f = fopen(snap_path, "w");
+      if (f) { realpot.dump_to_file(gone, f, dumpingstepwidth); fclose(f); }
+
       counter_wf = 0;
     }
   }
 
   // Final snapshot
-  wf.dump_to_file(g, file_wfdat, dumpingstepwidth);
-  kohnshamorbital.dump_to_file(gone, file_ks_orbital, dumpingstepwidth);
-  realpot.dump_to_file(gone, file_realpot, dumpingstepwidth);
+  snprintf(snap_path, sizeof(snap_path), "%s/wf_real_final.dat", cfg_output_dir);
+  { FILE* f = fopen(snap_path, "w");
+    if (f) { wf.dump_to_file(g, f, dumpingstepwidth); fclose(f); } }
+  snprintf(snap_path, sizeof(snap_path), "%s/ks_real_final.dat", cfg_output_dir);
+  { FILE* f = fopen(snap_path, "w");
+    if (f) { kohnshamorbital.dump_to_file(gone, f, dumpingstepwidth); fclose(f); } }
+  snprintf(snap_path, sizeof(snap_path), "%s/realpot_real_final.dat", cfg_output_dir);
+  { FILE* f = fopen(snap_path, "w");
+    if (f) { realpot.dump_to_file(gone, f, dumpingstepwidth); fclose(f); } }
 
-  fclose(file_wfdat);
-  fclose(file_ks_orbital);
-  fclose(file_realpot);
   fclose(file_obser);
 
   cout << me << ": ExactTDDFT done." << endl;

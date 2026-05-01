@@ -124,6 +124,49 @@ def parse_wavefunction(filepath, nx, ny):
     return wf[:expected].reshape(nx, ny)
 
 
+def parse_orbital_1d(filepath, nx):
+    """Parse a 1D complex orbital (KS orbital, effective potential) file.
+
+    The C++ solver writes pairs of (real, imag) values, one per grid point.
+
+    Returns a 1D complex numpy array of length nx, or None if missing.
+    """
+    filepath = Path(filepath)
+    if not filepath.is_file():
+        return None
+    try:
+        data = np.loadtxt(str(filepath))
+    except (ValueError, OSError):
+        return None
+    if data.ndim == 1:
+        data = data.reshape(-1, 2)
+    arr = data[:, 0] + 1j * data[:, 1]
+    if arr.size < nx:
+        return None
+    return arr[:nx]
+
+
+def _find_snapshots(output_dir, prefix):
+    """Generic finder for files of the form <prefix>NNNNNN.dat plus <prefix>final.dat."""
+    output_dir = Path(output_dir)
+    snapshots = []
+    for f in sorted(output_dir.glob(f"{prefix}*.dat")):
+        if f.name == f"{prefix}final.dat":
+            continue
+        m = re.match(rf"{prefix}(\d+)\.dat", f.name)
+        if m:
+            snapshots.append((int(m.group(1)), f))
+    final = output_dir / f"{prefix}final.dat"
+    if final.is_file():
+        snapshots.append((-1, final))
+    return snapshots
+
+
+def find_ks_snapshots(output_dir):
+    """KS-orbital snapshots written by the ExactTDDFT binary."""
+    return _find_snapshots(output_dir, "ks_real_")
+
+
 def find_wf_snapshots(output_dir):
     """Find all real-time wavefunction snapshot files in output directory.
 

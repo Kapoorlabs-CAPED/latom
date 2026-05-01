@@ -10,8 +10,10 @@ if _scripts_dir not in sys.path:
     sys.path.insert(0, _scripts_dir)
 
 from parser import (  # noqa: E402
+    find_ks_snapshots,
     find_wf_snapshots,
     parse_imag_observables,
+    parse_orbital_1d,
     parse_real_observables,
     parse_wavefunction,
 )
@@ -25,6 +27,7 @@ from plotting import (  # noqa: E402
     plot_energy_vs_time,
     plot_imag_convergence,
     plot_ionization,
+    plot_ks_orbital,
     plot_spectrum,
     plot_vector_potential,
     plot_wavefunction_2d,
@@ -33,7 +36,6 @@ from PyQt5.QtCore import Qt, QTimer  # noqa: E402
 from PyQt5.QtWidgets import (  # noqa: E402
     QApplication,
     QCheckBox,
-    QComboBox,
     QDoubleSpinBox,
     QFileDialog,
     QGroupBox,
@@ -74,6 +76,8 @@ class MainWindow(QMainWindow):
 
         self._wf_snapshots = []  # list of (timestep, path) tuples found so far
         self._wf_snap_idx = -1  # index into _wf_snapshots currently displayed
+        self._ks_snapshots = []
+        self._ks_snap_idx = -1
         self._setup_ui()
         self._update_build_status()
 
@@ -98,10 +102,9 @@ class MainWindow(QMainWindow):
         scroll_content = QWidget()
         scroll_layout = QVBoxLayout(scroll_content)
 
-        scroll_layout.addWidget(self._make_grid_group())
-        scroll_layout.addWidget(self._make_time_group())
-        scroll_layout.addWidget(self._make_laser_group())
-        scroll_layout.addWidget(self._make_physics_group())
+        # Mode tabs are the only thing in the parameter panel: each tab is a
+        # self-contained parameter set for one solver mode.
+        scroll_layout.addWidget(self._make_mode_tabs_group())
         scroll_layout.addStretch()
 
         scroll.setWidget(scroll_content)
@@ -130,41 +133,39 @@ class MainWindow(QMainWindow):
             "Vector Potential",
             "Spectrum",
             "1D Density",
+            "Ground State KS Orbital",
+            "Live KS Orbital",
             "Live WF",
         ]
+        # Tabs that are only meaningful in one mode. The others are shown
+        # in both. _apply_tab_visibility() toggles these on mode change.
+        self._tdse_only_tabs = ("1D Density",)
+        self._tddft_only_tabs = ("Ground State KS Orbital", "Live KS Orbital")
         for name in tab_names:
             if name == "Live WF":
-                # Live WF tab: fixed-size square canvas + prev/next scroll buttons
-                container = QWidget()
-                vbox = QVBoxLayout(container)
-                vbox.setContentsMargins(0, 0, 0, 0)
-                canvas = PlotCanvas(
-                    width=7, height=7, dpi=100, constrained=True
+                container = self._make_live_tab(
+                    name,
+                    square=True,
+                    on_prev=self._on_wf_prev,
+                    on_next=self._on_wf_next,
+                    label_attr="_lbl_wf_snap",
                 )
-                canvas.setFixedSize(700, 700)
-                self._canvases[name] = canvas
-                vbox.addWidget(canvas, alignment=Qt.AlignCenter)
-
-                nav_row = QWidget()
-                nav_layout = QHBoxLayout(nav_row)
-                nav_layout.setContentsMargins(4, 2, 4, 2)
-                self._btn_wf_prev = QPushButton("◀ Prev")
-                self._btn_wf_prev.clicked.connect(self._on_wf_prev)
-                self._btn_wf_next = QPushButton("Next ▶")
-                self._btn_wf_next.clicked.connect(self._on_wf_next)
-                self._lbl_wf_snap = QLabel("No snapshots yet")
-                self._lbl_wf_snap.setAlignment(Qt.AlignCenter)
-                nav_layout.addWidget(self._btn_wf_prev)
-                nav_layout.addWidget(self._lbl_wf_snap, stretch=1)
-                nav_layout.addWidget(self._btn_wf_next)
-                vbox.addWidget(nav_row)
-
+                self.tabs.addTab(container, name)
+            elif name == "Live KS Orbital":
+                container = self._make_live_tab(
+                    name,
+                    square=False,
+                    on_prev=self._on_ks_prev,
+                    on_next=self._on_ks_next,
+                    label_attr="_lbl_ks_snap",
+                )
                 self.tabs.addTab(container, name)
             else:
                 # "Excited States" manages its own subplot grid — no default axes
                 canvas = PlotCanvas(single_axes=(name != "Excited States"))
                 self._canvases[name] = canvas
                 self.tabs.addTab(canvas, name)
+        self._apply_tab_visibility()
 
         splitter.addWidget(self.tabs)
         splitter.setSizes([340, 860])
@@ -258,179 +259,312 @@ class MainWindow(QMainWindow):
             self._edit_exp_name.setText(self._experiment_name)
             self._lbl_work_dir.setText(str(self.work_dir))
 
-    def _make_grid_group(self):
+    # ------------------------------------------------------------ Mode tabs
+    #
+    # Each tab is a complete, self-contained parameter set for one solver
+    # mode. Widgets are stored in per-tab dicts (self._tab_widgets[mode]) so
+    # the two tabs do not share state — switching tabs picks the mode and
+    # uses *that tab's* values. Most parameters are duplicated by design:
+    # Exact-TDDFT runs the same TDSE machinery internally, so every TDSE
+    # control (excited states, autoionization, kick mode, ...) is also
+    # available in the TDDFT tab.
+
+    def _add_spin(
+        self,
+        layout,
+        target,
+        key,
+        label,
+        vmin,
+        vmax,
+        value,
+        is_float=False,
+        decimals=4,
+        tooltip=None,
+    ):
+        row, spin = self._make_spin(
+            label, vmin, vmax, value, is_float, decimals
+        )
+        if tooltip:
+            row.setToolTip(tooltip)
+        target[key] = spin
+        layout.addWidget(row)
+        return spin
+
+    def _add_check(self, layout, target, key, label, checked, tooltip=None):
+        chk = QCheckBox(label)
+        chk.setChecked(bool(checked))
+        if tooltip:
+            chk.setToolTip(tooltip)
+        target[key] = chk
+        layout.addWidget(chk)
+        return chk
+
+    def _build_param_tab(self, mode):
+        """Return a QWidget containing the full parameter UI for one mode.
+
+        The widget references are stored in self._tab_widgets[mode] keyed by
+        the matching SimulationConfig field name.
+        """
+        widgets = {}
+        self._tab_widgets[mode] = widgets
+
+        tab = QWidget()
+        outer = QVBoxLayout(tab)
+        outer.setContentsMargins(4, 4, 4, 4)
+
+        if mode == "exact_tddft":
+            outer.addWidget(
+                QLabel(
+                    "Solves the 2e TDSE and reconstructs the Kohn-Sham orbital\n"
+                    "and effective potential each time step (eq. 29)."
+                )
+            )
+
+        cfg = self.config
+
+        # ----- Grid -----
         grp = QGroupBox("Grid")
-        lay = QVBoxLayout(grp)
-        r, self.spin_nx = self._make_spin(
-            "N_x", 10, 10000, self.config.grid_nx
+        g = QVBoxLayout(grp)
+        self._add_spin(g, widgets, "grid_nx", "N_x", 10, 10000, cfg.grid_nx)
+        self._add_spin(g, widgets, "grid_ny", "N_y", 10, 10000, cfg.grid_ny)
+        self._add_spin(
+            g, widgets, "grid_dx", "dx", 0.01, 10.0, cfg.grid_dx, True
         )
-        lay.addWidget(r)
-        r, self.spin_ny = self._make_spin(
-            "N_y", 10, 10000, self.config.grid_ny
+        self._add_spin(
+            g, widgets, "grid_dy", "dy", 0.01, 10.0, cfg.grid_dy, True
         )
-        lay.addWidget(r)
-        r, self.spin_dx = self._make_spin(
-            "dx", 0.01, 10.0, self.config.grid_dx, True
-        )
-        lay.addWidget(r)
-        r, self.spin_dy = self._make_spin(
-            "dy", 0.01, 10.0, self.config.grid_dy, True
-        )
-        lay.addWidget(r)
-        return grp
+        outer.addWidget(grp)
 
-    def _make_time_group(self):
+        # ----- Time -----
         grp = QGroupBox("Time Propagation")
-        lay = QVBoxLayout(grp)
-        r, self.spin_imag_dt = self._make_spin(
-            "Imag dt", 0.001, 10.0, self.config.imag_dt, True
+        g = QVBoxLayout(grp)
+        self._add_spin(
+            g, widgets, "imag_dt", "Imag dt", 0.001, 10.0, cfg.imag_dt, True
         )
-        lay.addWidget(r)
-        r, self.spin_imag_steps = self._make_spin(
-            "Imag steps", 1, 1000000, self.config.imag_steps
+        self._add_spin(
+            g, widgets, "imag_steps", "Imag steps", 1, 1000000, cfg.imag_steps
         )
-        lay.addWidget(r)
-        r, self.spin_real_dt = self._make_spin(
-            "Real dt", 0.001, 10.0, self.config.real_dt, True
+        self._add_spin(
+            g, widgets, "real_dt", "Real dt", 0.001, 10.0, cfg.real_dt, True
         )
-        lay.addWidget(r)
-        r, self.spin_real_steps = self._make_spin(
-            "Real steps", 1, 1000000, self.config.real_steps
+        self._add_spin(
+            g, widgets, "real_steps", "Real steps", 1, 1000000, cfg.real_steps
         )
-        lay.addWidget(r)
-        return grp
+        outer.addWidget(grp)
 
-    def _make_laser_group(self):
+        # ----- Laser -----
         grp = QGroupBox("Laser (Velocity Gauge)")
-        lay = QVBoxLayout(grp)
-        r, self.spin_freq = self._make_spin(
-            "Frequency", 0.01, 100.0, self.config.laser_freq, True
+        g = QVBoxLayout(grp)
+        self._add_spin(
+            g,
+            widgets,
+            "laser_freq",
+            "Frequency",
+            0.01,
+            100.0,
+            cfg.laser_freq,
+            True,
         )
-        lay.addWidget(r)
-        r, self.spin_alpha = self._make_spin(
-            "Alpha", 0.001, 100.0, self.config.laser_alpha, True
+        self._add_spin(
+            g,
+            widgets,
+            "laser_alpha",
+            "Alpha",
+            0.001,
+            100.0,
+            cfg.laser_alpha,
+            True,
         )
-        lay.addWidget(r)
-        r, self.spin_cycles = self._make_spin(
-            "Cycles", 1.0, 10000.0, self.config.laser_cycles, True, decimals=1
-        )
-        lay.addWidget(r)
-        return grp
-
-    def _make_physics_group(self):
-        grp = QGroupBox("Physics")
-        lay = QVBoxLayout(grp)
-
-        # Solver mode: TDSE (default) vs Exact-TDDFT (KS reconstruction).
-        mode_row = QWidget()
-        mode_lay = QHBoxLayout(mode_row)
-        mode_lay.setContentsMargins(0, 0, 0, 0)
-        mode_lay.addWidget(QLabel("Solver mode"))
-        self.cmb_mode = QComboBox()
-        self.cmb_mode.addItem("TDSE (2e Schrodinger)", "tdse")
-        self.cmb_mode.addItem(
-            "Exact-TDDFT (reconstruct KS orbital)", "exact_tddft"
-        )
-        idx = self.cmb_mode.findData(getattr(self.config, "mode", "tdse"))
-        if idx >= 0:
-            self.cmb_mode.setCurrentIndex(idx)
-        self.cmb_mode.currentIndexChanged.connect(self._on_mode_changed)
-        mode_lay.addWidget(self.cmb_mode, 1)
-        lay.addWidget(mode_row)
-
-        # Exact-TDDFT specific caching toggles
-        self.chk_load_heplus = QCheckBox("Load He+ ground state from file")
-        self.chk_load_heplus.setChecked(
-            bool(getattr(self.config, "load_heplus", 0))
-        )
-        self.chk_load_heplus.setToolTip(
-            "Exact-TDDFT only: load wf_heliumplus.dat if present, else compute via 1D imag-time."
-        )
-        lay.addWidget(self.chk_load_heplus)
-        self.chk_load_ks_ground = QCheckBox("Load KS ground orbital from file")
-        self.chk_load_ks_ground.setChecked(
-            bool(getattr(self.config, "load_ks_ground", 0))
-        )
-        self.chk_load_ks_ground.setToolTip(
-            "Exact-TDDFT only: load ks_ground.dat if present, else build from 2e GS."
-        )
-        lay.addWidget(self.chk_load_ks_ground)
-
-        r, self.spin_eps = self._make_spin(
-            "Coulomb eps", 0.01, 10.0, self.config.coulomb_eps, True
-        )
-        lay.addWidget(r)
-        r, self.spin_absorb = self._make_spin(
-            "Absorb ampl",
-            0.0,
-            1000.0,
-            self.config.absorb_ampl,
+        self._add_spin(
+            g,
+            widgets,
+            "laser_cycles",
+            "Cycles",
+            1.0,
+            10000.0,
+            cfg.laser_cycles,
             True,
             decimals=1,
         )
-        lay.addWidget(r)
-        r, self.spin_box = self._make_spin(
-            "Ionization box", 1, 10000, self.config.ionization_box
-        )
-        lay.addWidget(r)
-        r, self.spin_n_excited = self._make_spin(
-            "N excited states", 0, 20, self.config.n_excited
-        )
-        lay.addWidget(r)
-        r, self.spin_excited_imag_mult = self._make_spin(
-            "Excited steps multiplier", 1, 100, self.config.excited_imag_mult
-        )
-        r.setToolTip(
-            "Multiplier for excited state imaginary time steps.\n"
-            "State N gets N × multiplier × imag_steps.\n"
-            "Default 1: state 1 gets imag_steps, state 2 gets 2×imag_steps, etc."
-        )
-        lay.addWidget(r)
-        self.chk_load_ground = QCheckBox("Load ground state from file")
-        self.chk_load_ground.setChecked(bool(self.config.load_ground))
-        lay.addWidget(self.chk_load_ground)
-        self.chk_load_excited = QCheckBox("Load excited states from file")
-        self.chk_load_excited.setChecked(bool(self.config.load_excited))
-        self.chk_load_excited.setToolTip(
-            "When checked, loads wf_excited_N.dat if it exists instead of recomputing."
-        )
-        lay.addWidget(self.chk_load_excited)
-        r, self.spin_laser_init_state = self._make_spin(
-            "Laser initial state", 0, 20, self.config.laser_init_state
-        )
-        r.setToolTip("0 = ground state, N = Nth excited state")
-        lay.addWidget(r)
+        outer.addWidget(grp)
 
-        # Autoionizing mode (Feit-Fleck-Steiger)
-        self.chk_auto_mode = QCheckBox(
-            "Autoionizing mode (Feit-Fleck-Steiger)"
+        # ----- Physics -----
+        grp = QGroupBox("Physics")
+        g = QVBoxLayout(grp)
+        self._add_spin(
+            g,
+            widgets,
+            "coulomb_eps",
+            "Coulomb eps",
+            0.01,
+            10.0,
+            cfg.coulomb_eps,
+            True,
         )
-        self.chk_auto_mode.setChecked(bool(self.config.auto_mode))
-        lay.addWidget(self.chk_auto_mode)
-        r, self.spin_auto_target_energy = self._make_spin(
+        self._add_spin(
+            g,
+            widgets,
+            "absorb_ampl",
+            "Absorb ampl",
+            0.0,
+            1000.0,
+            cfg.absorb_ampl,
+            True,
+            decimals=1,
+        )
+        self._add_spin(
+            g,
+            widgets,
+            "ionization_box",
+            "Ionization box",
+            1,
+            10000,
+            cfg.ionization_box,
+        )
+        self._add_check(
+            g,
+            widgets,
+            "load_ground",
+            "Load 2e ground state from file",
+            cfg.load_ground,
+            "Load wf_ground.dat if present, else compute via imaginary-time.",
+        )
+        outer.addWidget(grp)
+
+        # ----- States (TDSE-style features, available in both modes) -----
+        grp = QGroupBox("States")
+        g = QVBoxLayout(grp)
+        self._add_spin(
+            g, widgets, "n_excited", "N excited states", 0, 20, cfg.n_excited
+        )
+        self._add_spin(
+            g,
+            widgets,
+            "excited_imag_mult",
+            "Excited steps multiplier",
+            1,
+            100,
+            cfg.excited_imag_mult,
+            tooltip=(
+                "Multiplier for excited state imaginary time steps.\n"
+                "State N gets N * multiplier * imag_steps."
+            ),
+        )
+        self._add_check(
+            g,
+            widgets,
+            "load_excited",
+            "Load excited states from file",
+            cfg.load_excited,
+            "When checked, loads wf_excited_N.dat if it exists instead of recomputing.",
+        )
+        self._add_spin(
+            g,
+            widgets,
+            "laser_init_state",
+            "Laser initial state",
+            0,
+            20,
+            cfg.laser_init_state,
+            tooltip="0 = ground state, N = Nth excited state",
+        )
+        outer.addWidget(grp)
+
+        # ----- Autoionizing -----
+        grp = QGroupBox("Autoionizing (Feit-Fleck-Steiger)")
+        g = QVBoxLayout(grp)
+        self._add_check(
+            g,
+            widgets,
+            "auto_mode",
+            "Enable autoionizing mode",
+            cfg.auto_mode,
+        )
+        self._add_spin(
+            g,
+            widgets,
+            "auto_target_energy",
             "Target energy (a.u.)",
             -10.0,
             10.0,
-            self.config.auto_target_energy,
+            cfg.auto_target_energy,
             is_float=True,
             decimals=4,
         )
-        lay.addWidget(r)
+        outer.addWidget(grp)
 
-        # Kick mode (linear response)
-        self.chk_kick_mode = QCheckBox("Kick mode (linear response spectrum)")
-        self.chk_kick_mode.setChecked(bool(self.config.kick_mode))
-        lay.addWidget(self.chk_kick_mode)
-        r, self.spin_kick_strength = self._make_spin(
+        # ----- Kick (linear response) -----
+        grp = QGroupBox("Kick (linear response)")
+        g = QVBoxLayout(grp)
+        self._add_check(
+            g,
+            widgets,
+            "kick_mode",
+            "Enable kick mode",
+            cfg.kick_mode,
+        )
+        self._add_spin(
+            g,
+            widgets,
+            "kick_strength",
             "Kick strength A_0",
             0.0,
             1.0,
-            self.config.kick_strength,
+            cfg.kick_strength,
             is_float=True,
             decimals=4,
         )
-        lay.addWidget(r)
+        outer.addWidget(grp)
+
+        # ----- Exact-TDDFT-only caching -----
+        if mode == "exact_tddft":
+            grp = QGroupBox("Kohn-Sham caching")
+            g = QVBoxLayout(grp)
+            self._add_check(
+                g,
+                widgets,
+                "load_heplus",
+                "Load He+ ground state from file",
+                getattr(cfg, "load_heplus", 0),
+                "Load wf_heliumplus.dat if present, else compute via 1D imag-time.",
+            )
+            self._add_check(
+                g,
+                widgets,
+                "load_ks_ground",
+                "Load KS ground orbital from file",
+                getattr(cfg, "load_ks_ground", 0),
+                "Load ks_ground.dat if present, else build from 2e GS density.",
+            )
+            outer.addWidget(grp)
+
+        outer.addStretch()
+        return tab
+
+    def _make_mode_tabs_group(self):
+        """Top-level tab widget: each tab is a self-contained mode."""
+        self._tab_widgets = {"tdse": {}, "exact_tddft": {}}
+        grp = QGroupBox("Solver Mode")
+        lay = QVBoxLayout(grp)
+        self.mode_tabs = QTabWidget()
+        self.mode_tabs.addTab(self._build_param_tab("tdse"), "TDSE")
+        self.mode_tabs.addTab(
+            self._build_param_tab("exact_tddft"), "Exact-TDDFT"
+        )
+        idx = 1 if getattr(self.config, "mode", "tdse") == "exact_tddft" else 0
+        self.mode_tabs.setCurrentIndex(idx)
+        self.mode_tabs.currentChanged.connect(self._on_mode_changed)
+        lay.addWidget(self.mode_tabs)
         return grp
+
+    def _current_mode(self):
+        """Return the solver mode string for the active tab."""
+        return "exact_tddft" if self.mode_tabs.currentIndex() == 1 else "tdse"
+
+    def _active_widgets(self):
+        """Widget dict for the currently active mode tab."""
+        return self._tab_widgets[self._current_mode()]
 
     def _make_controls_group(self):
         grp = QGroupBox("Controls")
@@ -530,11 +664,7 @@ class MainWindow(QMainWindow):
         )
 
     def _update_build_status(self):
-        mode = (
-            self.cmb_mode.currentData()
-            if hasattr(self, "cmb_mode")
-            else "tdse"
-        )
+        mode = self._current_mode() if hasattr(self, "mode_tabs") else "tdse"
         label = {"tdse": "TDSE", "exact_tddft": "ExactTDDFT"}.get(mode, mode)
         if not is_solver_built(mode=mode):
             self.build_status_label.setText(f"{label}: not built")
@@ -548,80 +678,84 @@ class MainWindow(QMainWindow):
             self.build_status_label.setText(f"{label}: built (up to date)")
             self.build_status_label.setStyleSheet("color: green;")
 
+    # Field names matching SimulationConfig that are in every tab.
+    _COMMON_FIELDS = (
+        "grid_nx",
+        "grid_ny",
+        "grid_dx",
+        "grid_dy",
+        "imag_dt",
+        "imag_steps",
+        "real_dt",
+        "real_steps",
+        "laser_freq",
+        "laser_alpha",
+        "laser_cycles",
+        "coulomb_eps",
+        "absorb_ampl",
+        "ionization_box",
+        "load_ground",
+        "load_excited",
+        "n_excited",
+        "excited_imag_mult",
+        "laser_init_state",
+        "auto_mode",
+        "auto_target_energy",
+        "kick_mode",
+        "kick_strength",
+    )
+    _TDDFT_ONLY_FIELDS = ("load_heplus", "load_ks_ground")
+
+    @staticmethod
+    def _read_widget(w):
+        from PyQt5.QtWidgets import QCheckBox
+
+        if isinstance(w, QCheckBox):
+            return 1 if w.isChecked() else 0
+        return w.value()
+
+    @staticmethod
+    def _write_widget(w, value):
+        from PyQt5.QtWidgets import QCheckBox
+
+        if isinstance(w, QCheckBox):
+            w.setChecked(bool(value))
+        else:
+            w.setValue(value)
+
     def _collect_config(self):
-        """Read GUI spin boxes into a SimulationConfig."""
-        self.config = SimulationConfig(
-            grid_nx=self.spin_nx.value(),
-            grid_ny=self.spin_ny.value(),
-            grid_dx=self.spin_dx.value(),
-            grid_dy=self.spin_dy.value(),
-            imag_dt=self.spin_imag_dt.value(),
-            imag_steps=self.spin_imag_steps.value(),
-            real_dt=self.spin_real_dt.value(),
-            real_steps=self.spin_real_steps.value(),
-            laser_freq=self.spin_freq.value(),
-            laser_alpha=self.spin_alpha.value(),
-            laser_cycles=self.spin_cycles.value(),
-            coulomb_eps=self.spin_eps.value(),
-            absorb_ampl=self.spin_absorb.value(),
-            ionization_box=self.spin_box.value(),
-            n_excited=self.spin_n_excited.value(),
-            excited_imag_mult=self.spin_excited_imag_mult.value(),
-            load_ground=1 if self.chk_load_ground.isChecked() else 0,
-            load_excited=1 if self.chk_load_excited.isChecked() else 0,
-            laser_init_state=self.spin_laser_init_state.value(),
-            auto_mode=1 if self.chk_auto_mode.isChecked() else 0,
-            auto_target_energy=self.spin_auto_target_energy.value(),
-            kick_mode=1 if self.chk_kick_mode.isChecked() else 0,
-            kick_strength=self.spin_kick_strength.value(),
-            mode=self.cmb_mode.currentData(),
-            load_heplus=1 if self.chk_load_heplus.isChecked() else 0,
-            load_ks_ground=1 if self.chk_load_ks_ground.isChecked() else 0,
-        )
+        """Read the active tab's widgets into a SimulationConfig."""
+        widgets = self._active_widgets()
+        mode = self._current_mode()
+        kwargs = {"mode": mode}
+        for k in self._COMMON_FIELDS:
+            kwargs[k] = self._read_widget(widgets[k])
+        for k in self._TDDFT_ONLY_FIELDS:
+            if k in widgets:
+                kwargs[k] = self._read_widget(widgets[k])
+        self.config = SimulationConfig(**kwargs)
 
     def _populate_spins(self):
-        """Write config values into GUI spin boxes."""
-        self.spin_nx.setValue(self.config.grid_nx)
-        self.spin_ny.setValue(self.config.grid_ny)
-        self.spin_dx.setValue(self.config.grid_dx)
-        self.spin_dy.setValue(self.config.grid_dy)
-        self.spin_imag_dt.setValue(self.config.imag_dt)
-        self.spin_imag_steps.setValue(self.config.imag_steps)
-        self.spin_real_dt.setValue(self.config.real_dt)
-        self.spin_real_steps.setValue(self.config.real_steps)
-        self.spin_freq.setValue(self.config.laser_freq)
-        self.spin_alpha.setValue(self.config.laser_alpha)
-        self.spin_cycles.setValue(self.config.laser_cycles)
-        self.spin_eps.setValue(self.config.coulomb_eps)
-        self.spin_absorb.setValue(self.config.absorb_ampl)
-        self.spin_box.setValue(self.config.ionization_box)
-        self.spin_n_excited.setValue(self.config.n_excited)
-        self.spin_excited_imag_mult.setValue(self.config.excited_imag_mult)
-        self.chk_load_ground.setChecked(bool(self.config.load_ground))
-        self.chk_load_excited.setChecked(bool(self.config.load_excited))
-        self.spin_laser_init_state.setValue(self.config.laser_init_state)
-        self.chk_auto_mode.setChecked(bool(self.config.auto_mode))
-        self.spin_auto_target_energy.setValue(self.config.auto_target_energy)
-        self.chk_kick_mode.setChecked(bool(self.config.kick_mode))
-        self.spin_kick_strength.setValue(self.config.kick_strength)
-        idx = self.cmb_mode.findData(getattr(self.config, "mode", "tdse"))
-        if idx >= 0:
-            self.cmb_mode.setCurrentIndex(idx)
-        self.chk_load_heplus.setChecked(
-            bool(getattr(self.config, "load_heplus", 0))
-        )
-        self.chk_load_ks_ground.setChecked(
-            bool(getattr(self.config, "load_ks_ground", 0))
-        )
+        """Write self.config into both tabs so each tab reflects the load.
+
+        The mode tab is then switched to match config.mode.
+        """
+        for mode, widgets in self._tab_widgets.items():
+            for k in self._COMMON_FIELDS:
+                if k in widgets:
+                    self._write_widget(widgets[k], getattr(self.config, k))
+            for k in self._TDDFT_ONLY_FIELDS:
+                if k in widgets:
+                    self._write_widget(widgets[k], getattr(self.config, k, 0))
+        idx = 1 if getattr(self.config, "mode", "tdse") == "exact_tddft" else 0
+        self.mode_tabs.setCurrentIndex(idx)
         self._on_mode_changed()
 
-    def _on_mode_changed(self):
-        """Enable/disable Exact-TDDFT-only widgets based on selected mode."""
-        is_tddft = self.cmb_mode.currentData() == "exact_tddft"
-        self.chk_load_heplus.setEnabled(is_tddft)
-        self.chk_load_ks_ground.setEnabled(is_tddft)
+    def _on_mode_changed(self, *_):
+        """Refresh build status and plot-tab visibility when mode changes."""
         if hasattr(self, "build_status_label"):
             self._update_build_status()
+        self._apply_tab_visibility()
 
     # ---- Build ----
 
@@ -643,10 +777,11 @@ class MainWindow(QMainWindow):
     # ---- Run ----
 
     def _on_run(self):
-        if not is_solver_built():
+        mode = self._current_mode()
+        if not is_solver_built(mode=mode):
             QMessageBox.warning(self, "Not Built", "Build the solver first.")
             return
-        if is_solver_stale():
+        if is_solver_stale(mode=mode):
             QMessageBox.warning(
                 self,
                 "Rebuild Required",
@@ -764,6 +899,14 @@ class MainWindow(QMainWindow):
             self._wf_snap_idx = len(snapshots) - 1  # jump to latest
             self._show_wf_snapshot(self._wf_snap_idx)
 
+        # Live KS Orbital (Exact-TDDFT only)
+        if self._current_mode() == "exact_tddft":
+            ks_snaps = find_ks_snapshots(out)
+            if len(ks_snaps) > len(self._ks_snapshots):
+                self._ks_snapshots = ks_snaps
+                self._ks_snap_idx = len(ks_snaps) - 1
+                self._show_ks_snapshot(self._ks_snap_idx)
+
     def _show_wf_snapshot(self, idx):
         """Render snapshot at index idx into the Live WF canvas."""
         if not self._wf_snapshots:
@@ -788,6 +931,80 @@ class MainWindow(QMainWindow):
 
     def _on_wf_next(self):
         self._show_wf_snapshot(self._wf_snap_idx + 1)
+
+    # ---- Live KS orbital snapshot tab ----
+
+    def _make_live_tab(self, name, square, on_prev, on_next, label_attr):
+        """Build a live snapshot tab (canvas + prev/next nav).
+
+        Used by Live WF (square 700x700) and Live KS Orbital (default size).
+        """
+        container = QWidget()
+        vbox = QVBoxLayout(container)
+        vbox.setContentsMargins(0, 0, 0, 0)
+        if square:
+            canvas = PlotCanvas(width=7, height=7, dpi=100, constrained=True)
+            canvas.setFixedSize(700, 700)
+            vbox.addWidget(canvas, alignment=Qt.AlignCenter)
+        else:
+            canvas = PlotCanvas()
+            vbox.addWidget(canvas)
+        self._canvases[name] = canvas
+
+        nav_row = QWidget()
+        nav_layout = QHBoxLayout(nav_row)
+        nav_layout.setContentsMargins(4, 2, 4, 2)
+        btn_prev = QPushButton("◀ Prev")
+        btn_prev.clicked.connect(on_prev)
+        btn_next = QPushButton("Next ▶")
+        btn_next.clicked.connect(on_next)
+        lbl = QLabel("No snapshots yet")
+        lbl.setAlignment(Qt.AlignCenter)
+        setattr(self, label_attr, lbl)
+        nav_layout.addWidget(btn_prev)
+        nav_layout.addWidget(lbl, stretch=1)
+        nav_layout.addWidget(btn_next)
+        vbox.addWidget(nav_row)
+        return container
+
+    def _show_ks_snapshot(self, idx):
+        if not self._ks_snapshots:
+            return
+        idx = max(0, min(idx, len(self._ks_snapshots) - 1))
+        self._ks_snap_idx = idx
+        ts, path = self._ks_snapshots[idx]
+        nx, dx = self.config.grid_nx, self.config.grid_dx
+        orbital = parse_orbital_1d(path, nx)
+        c = self._canvases["Live KS Orbital"]
+        label = "final" if ts == -1 else f"step {ts}"
+        plot_ks_orbital(
+            c.axes, orbital, dx, nx, title=rf"KS orbital — {label}"
+        )
+        c.clear_and_draw()
+        self._lbl_ks_snap.setText(
+            f"Snapshot {idx + 1} / {len(self._ks_snapshots)}  ({label})"
+        )
+
+    def _on_ks_prev(self):
+        self._show_ks_snapshot(self._ks_snap_idx - 1)
+
+    def _on_ks_next(self):
+        self._show_ks_snapshot(self._ks_snap_idx + 1)
+
+    def _apply_tab_visibility(self):
+        """Show/hide plot tabs based on the current solver mode."""
+        if not hasattr(self, "tabs"):
+            return
+        mode = self._current_mode() if hasattr(self, "mode_tabs") else "tdse"
+        is_tddft = mode == "exact_tddft"
+        for i in range(self.tabs.count()):
+            name = self.tabs.tabText(i)
+            if name in self._tdse_only_tabs:
+                self.tabs.setTabVisible(i, not is_tddft)
+            elif name in self._tddft_only_tabs:
+                self.tabs.setTabVisible(i, is_tddft)
+            else:
+                self.tabs.setTabVisible(i, True)
 
     def _refresh_all_plots(self):
         """Refresh all plots from output files."""
@@ -851,6 +1068,22 @@ class MainWindow(QMainWindow):
         c = self._canvases["1D Density"]
         plot_density_1d(c.axes, wf_latest, dx, dy, nx, ny)
         c.clear_and_draw()
+
+        # Exact-TDDFT: ground-state KS orbital + live KS orbital snapshots
+        if self._current_mode() == "exact_tddft":
+            ks_gs = parse_orbital_1d(out / self.config.ks_ground_file, nx)
+            c = self._canvases["Ground State KS Orbital"]
+            plot_ks_orbital(
+                c.axes, ks_gs, dx, nx, title="Ground-state KS orbital"
+            )
+            c.clear_and_draw()
+
+            ks_snaps = find_ks_snapshots(out)
+            if ks_snaps:
+                if len(ks_snaps) != len(self._ks_snapshots):
+                    self._ks_snapshots = ks_snaps
+                    self._ks_snap_idx = len(ks_snaps) - 1
+                self._show_ks_snapshot(self._ks_snap_idx)
 
         # Excited state wavefunctions — all in a single tab with grid layout
         excited_wfs = []

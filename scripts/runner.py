@@ -21,6 +21,11 @@ def get_solver_dir():
 
 _BINARY_NAMES = {"tdse": "TDSE", "exact_tddft": "ExactTDDFT"}
 
+# Per-binary source files. Headers + shared sources affect both binaries;
+# the driver .cc only affects its own binary.
+_SHARED_SOURCES = ("wavefunction.cc", "hamop.cc", "grid.cc", "fluid.cc")
+_DRIVER_SOURCES = {"tdse": "TDSE.cc", "exact_tddft": "ExactTDDFT.cc"}
+
 
 def _binary_name(mode):
     """Return the executable name for a solver mode."""
@@ -40,7 +45,12 @@ def is_solver_built(solver_dir=None, mode="tdse"):
 
 
 def is_solver_stale(solver_dir=None, mode="tdse"):
-    """Check if any source file is newer than the solver binary for this mode."""
+    """Check if any *relevant* source is newer than the binary for this mode.
+
+    Only the sources that go into this binary count: the driver .cc, the
+    shared .cc files, and any header. Editing the *other* mode's driver
+    file does not make this binary stale.
+    """
     if solver_dir is None:
         solver_dir = get_solver_dir()
     solver_dir = Path(solver_dir)
@@ -48,10 +58,15 @@ def is_solver_stale(solver_dir=None, mode="tdse"):
     if not binary.is_file():
         return True
     binary_mtime = binary.stat().st_mtime
-    for ext in ("*.cc", "*.h"):
-        for src in solver_dir.glob(ext):
-            if src.stat().st_mtime > binary_mtime:
-                return True
+
+    relevant = {_DRIVER_SOURCES[mode], *_SHARED_SOURCES}
+    for name in relevant:
+        p = solver_dir / name
+        if p.is_file() and p.stat().st_mtime > binary_mtime:
+            return True
+    for h in solver_dir.glob("*.h"):
+        if h.stat().st_mtime > binary_mtime:
+            return True
     return False
 
 
@@ -72,8 +87,11 @@ def build_solver(solver_dir=None, on_output=None):
         solver_dir = get_solver_dir()
     solver_dir = Path(solver_dir)
 
+    # `-B` forces every target to be remade unconditionally; one Build click
+    # rebuilds both binaries from scratch, no staleness games. Don't use
+    # `clean all` with -j: those targets race and can leave you with nothing.
     proc = subprocess.Popen(
-        ["make", "-j4"],
+        ["make", "-j4", "-B", "all"],
         cwd=str(solver_dir),
         stdout=subprocess.PIPE,
         stderr=subprocess.STDOUT,

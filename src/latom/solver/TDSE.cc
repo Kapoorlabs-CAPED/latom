@@ -91,7 +91,8 @@ static void read_config(const char* filename)
       else if (strcmp(key, "obser_file") == 0) snprintf(cfg_obser_file, sizeof(cfg_obser_file), "%s", value);
       else if (strcmp(key, "obser_imag_file") == 0) snprintf(cfg_obser_imag_file, sizeof(cfg_obser_imag_file), "%s", value);
       else if (strcmp(key, "reading_file") == 0) snprintf(cfg_reading_file, sizeof(cfg_reading_file), "%s", value);
-      else fprintf(stderr, "Warning: unknown config key '%s'\n", key);
+      // Unknown keys are silently ignored: the same .cfg is shared with the
+      // ExactTDDFT binary, which adds keys this driver doesn't use.
     }
   }
   fclose(f);
