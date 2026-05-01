@@ -112,14 +112,14 @@ def plot_wavefunction_2d(ax, wf, dx, dy, nx, ny, vmin_orders=7):
         ny: Number of grid points in y.
         vmin_orders: Orders of magnitude below max to display.
     """
-    # Remove existing colorbars before clearing (colorbars live on the figure,
-    # not the axes, so ax.clear() alone leaves them behind)
-    fig = ax.figure
-    for cb_ax in [a for a in fig.axes if a is not ax]:
+    # Remove previous colorbar if any (stored as attribute to avoid touching
+    # figure axes list directly, which corrupts constrained_layout state)
+    if hasattr(ax, "_latom_cbar"):
         try:
-            cb_ax.remove()
+            ax._latom_cbar.remove()
         except Exception:
             pass
+        del ax._latom_cbar
     ax.clear()
     if wf is None:
         ax.set_title("No wavefunction data")
@@ -158,9 +158,10 @@ def plot_wavefunction_2d(ax, wf, dx, dy, nx, ny, vmin_orders=7):
     ax.set_title(r"$\log_{10}|\psi(x_1,x_2)|^2$")
     ax.set_aspect("equal")
 
-    # Add colorbar
+    # Add colorbar and store reference for clean removal on next call
     cbar = ax.figure.colorbar(im, ax=ax, fraction=0.046, pad=0.04)
     cbar.set_label(r"$\log_{10}(|\psi|^2 / \max)$")
+    ax._latom_cbar = cbar
 
 
 def plot_density_1d(ax, wf, dx, dy, nx, ny, axis="x"):

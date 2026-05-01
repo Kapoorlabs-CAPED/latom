@@ -64,6 +64,21 @@ class SimulationConfig:
     # Real-time initial state: 0 = ground state, N = excited state N
     laser_init_state: int = 0
 
+    # Solver mode: "tdse" runs the standard 2e Schrodinger solver,
+    # "exact_tddft" runs the Exact-TDDFT driver that also reconstructs
+    # the Kohn-Sham orbital and effective potential each step.
+    mode: str = "tdse"
+
+    # Exact-TDDFT caching / inputs (ignored when mode == "tdse")
+    load_heplus: int = 0
+    load_ks_ground: int = 0
+    heplus_imag_steps: int = 0  # 0 -> reuse imag_steps
+    heplus_file: str = "wf_heliumplus.dat"
+    ks_ground_file: str = "ks_ground.dat"
+    ks_orbital_file: str = "kohnshamorbital_laser.dat"
+    realpot_file: str = "realpot_laser.dat"
+    ground_file: str = "wf_ground.dat"
+
     # Output file names
     output_dir: str = "res"
     wf_file: str = "wf_laser.dat"

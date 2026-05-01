@@ -19,33 +19,32 @@ def get_solver_dir():
     return package_root / "solver"
 
 
-def is_solver_built(solver_dir=None):
-    """Check if the TDSE binary exists.
+_BINARY_NAMES = {"tdse": "TDSE", "exact_tddft": "ExactTDDFT"}
 
-    Args:
-        solver_dir: Path to solver directory. Uses default if None.
 
-    Returns:
-        True if the binary exists.
-    """
+def _binary_name(mode):
+    """Return the executable name for a solver mode."""
+    try:
+        return _BINARY_NAMES[mode]
+    except KeyError:
+        raise ValueError(
+            f"Unknown solver mode '{mode}'. Expected one of {list(_BINARY_NAMES)}."
+        )
+
+
+def is_solver_built(solver_dir=None, mode="tdse"):
+    """Check if the solver binary for the given mode exists."""
     if solver_dir is None:
         solver_dir = get_solver_dir()
-    return (Path(solver_dir) / "TDSE").is_file()
+    return (Path(solver_dir) / _binary_name(mode)).is_file()
 
 
-def is_solver_stale(solver_dir=None):
-    """Check if any source file is newer than the TDSE binary.
-
-    Args:
-        solver_dir: Path to solver directory. Uses default if None.
-
-    Returns:
-        True if the binary is out of date and needs rebuilding.
-    """
+def is_solver_stale(solver_dir=None, mode="tdse"):
+    """Check if any source file is newer than the solver binary for this mode."""
     if solver_dir is None:
         solver_dir = get_solver_dir()
     solver_dir = Path(solver_dir)
-    binary = solver_dir / "TDSE"
+    binary = solver_dir / _binary_name(mode)
     if not binary.is_file():
         return True
     binary_mtime = binary.stat().st_mtime
@@ -122,15 +121,16 @@ def run_simulation(config, work_dir, solver_dir=None, on_output=None):
     config.output_dir = "."
     config.write_ini(config_path)
 
-    # Find the TDSE binary
-    tdse_bin = solver_dir / "TDSE"
-    if not tdse_bin.is_file():
+    # Pick binary based on solver mode
+    mode = getattr(config, "mode", "tdse")
+    binary = solver_dir / _binary_name(mode)
+    if not binary.is_file():
         raise FileNotFoundError(
-            f"TDSE binary not found at {tdse_bin}. Run build_solver() first."
+            f"Solver binary not found at {binary}. Run build_solver() first."
         )
 
     proc = subprocess.Popen(
-        [str(tdse_bin), str(config_path)],
+        [str(binary), str(config_path)],
         cwd=str(work_dir),
         stdout=subprocess.PIPE,
         stderr=subprocess.STDOUT,

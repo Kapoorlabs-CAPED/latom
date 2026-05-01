@@ -33,6 +33,7 @@ from PyQt5.QtCore import Qt, QTimer  # noqa: E402
 from PyQt5.QtWidgets import (  # noqa: E402
     QApplication,
     QCheckBox,
+    QComboBox,
     QDoubleSpinBox,
     QFileDialog,
     QGroupBox,
@@ -319,6 +320,42 @@ class MainWindow(QMainWindow):
     def _make_physics_group(self):
         grp = QGroupBox("Physics")
         lay = QVBoxLayout(grp)
+
+        # Solver mode: TDSE (default) vs Exact-TDDFT (KS reconstruction).
+        mode_row = QWidget()
+        mode_lay = QHBoxLayout(mode_row)
+        mode_lay.setContentsMargins(0, 0, 0, 0)
+        mode_lay.addWidget(QLabel("Solver mode"))
+        self.cmb_mode = QComboBox()
+        self.cmb_mode.addItem("TDSE (2e Schrodinger)", "tdse")
+        self.cmb_mode.addItem(
+            "Exact-TDDFT (reconstruct KS orbital)", "exact_tddft"
+        )
+        idx = self.cmb_mode.findData(getattr(self.config, "mode", "tdse"))
+        if idx >= 0:
+            self.cmb_mode.setCurrentIndex(idx)
+        self.cmb_mode.currentIndexChanged.connect(self._on_mode_changed)
+        mode_lay.addWidget(self.cmb_mode, 1)
+        lay.addWidget(mode_row)
+
+        # Exact-TDDFT specific caching toggles
+        self.chk_load_heplus = QCheckBox("Load He+ ground state from file")
+        self.chk_load_heplus.setChecked(
+            bool(getattr(self.config, "load_heplus", 0))
+        )
+        self.chk_load_heplus.setToolTip(
+            "Exact-TDDFT only: load wf_heliumplus.dat if present, else compute via 1D imag-time."
+        )
+        lay.addWidget(self.chk_load_heplus)
+        self.chk_load_ks_ground = QCheckBox("Load KS ground orbital from file")
+        self.chk_load_ks_ground.setChecked(
+            bool(getattr(self.config, "load_ks_ground", 0))
+        )
+        self.chk_load_ks_ground.setToolTip(
+            "Exact-TDDFT only: load ks_ground.dat if present, else build from 2e GS."
+        )
+        lay.addWidget(self.chk_load_ks_ground)
+
         r, self.spin_eps = self._make_spin(
             "Coulomb eps", 0.01, 10.0, self.config.coulomb_eps, True
         )
@@ -493,16 +530,22 @@ class MainWindow(QMainWindow):
         )
 
     def _update_build_status(self):
-        if not is_solver_built():
-            self.build_status_label.setText("Solver: not built")
+        mode = (
+            self.cmb_mode.currentData()
+            if hasattr(self, "cmb_mode")
+            else "tdse"
+        )
+        label = {"tdse": "TDSE", "exact_tddft": "ExactTDDFT"}.get(mode, mode)
+        if not is_solver_built(mode=mode):
+            self.build_status_label.setText(f"{label}: not built")
             self.build_status_label.setStyleSheet("color: red;")
-        elif is_solver_stale():
+        elif is_solver_stale(mode=mode):
             self.build_status_label.setText(
-                "Solver: REBUILD NEEDED (source changed)"
+                f"{label}: REBUILD NEEDED (source changed)"
             )
             self.build_status_label.setStyleSheet("color: orange;")
         else:
-            self.build_status_label.setText("Solver: built (up to date)")
+            self.build_status_label.setText(f"{label}: built (up to date)")
             self.build_status_label.setStyleSheet("color: green;")
 
     def _collect_config(self):
@@ -531,6 +574,9 @@ class MainWindow(QMainWindow):
             auto_target_energy=self.spin_auto_target_energy.value(),
             kick_mode=1 if self.chk_kick_mode.isChecked() else 0,
             kick_strength=self.spin_kick_strength.value(),
+            mode=self.cmb_mode.currentData(),
+            load_heplus=1 if self.chk_load_heplus.isChecked() else 0,
+            load_ks_ground=1 if self.chk_load_ks_ground.isChecked() else 0,
         )
 
     def _populate_spins(self):
@@ -558,6 +604,24 @@ class MainWindow(QMainWindow):
         self.spin_auto_target_energy.setValue(self.config.auto_target_energy)
         self.chk_kick_mode.setChecked(bool(self.config.kick_mode))
         self.spin_kick_strength.setValue(self.config.kick_strength)
+        idx = self.cmb_mode.findData(getattr(self.config, "mode", "tdse"))
+        if idx >= 0:
+            self.cmb_mode.setCurrentIndex(idx)
+        self.chk_load_heplus.setChecked(
+            bool(getattr(self.config, "load_heplus", 0))
+        )
+        self.chk_load_ks_ground.setChecked(
+            bool(getattr(self.config, "load_ks_ground", 0))
+        )
+        self._on_mode_changed()
+
+    def _on_mode_changed(self):
+        """Enable/disable Exact-TDDFT-only widgets based on selected mode."""
+        is_tddft = self.cmb_mode.currentData() == "exact_tddft"
+        self.chk_load_heplus.setEnabled(is_tddft)
+        self.chk_load_ks_ground.setEnabled(is_tddft)
+        if hasattr(self, "build_status_label"):
+            self._update_build_status()
 
     # ---- Build ----
 
