@@ -167,6 +167,62 @@ def find_ks_snapshots(output_dir):
     return _find_snapshots(output_dir, "ks_real_")
 
 
+def parse_vks_fft(filepath):
+    """Read the online-accumulated |V_KS(x, ω)|² written by ExactTDDFT.
+
+    File format:
+        # nx=N dx=DX x_offset=X0 n_omega=M omega_min=OM omega_max=OX omega_L=OL
+        <N rows of M space-separated doubles each>
+
+    Returns a dict::
+
+        {
+          "x": np.ndarray of length N (a.u.),
+          "omega": np.ndarray of length M (a.u.),
+          "harmonic": np.ndarray of length M (omega / omega_L),
+          "power": np.ndarray of shape (N, M)  -- |V̂_KS(x, ω)|²,
+          "omega_L": float,
+        }
+
+    Returns None if the file doesn't exist or is malformed.
+    """
+    filepath = Path(filepath)
+    if not filepath.is_file():
+        return None
+    try:
+        with open(filepath) as f:
+            header = f.readline()
+        if not header.startswith("#"):
+            return None
+        kv = {}
+        for tok in header[1:].strip().split():
+            if "=" in tok:
+                k, v = tok.split("=", 1)
+                kv[k] = v
+        nx = int(kv["nx"])
+        dx = float(kv["dx"])
+        x_offset = float(kv["x_offset"])
+        n_omega = int(kv["n_omega"])
+        omega_min = float(kv["omega_min"])
+        omega_max = float(kv["omega_max"])
+        omega_L = float(kv["omega_L"])
+        power = np.loadtxt(str(filepath), comments="#")
+        if power.shape != (nx, n_omega):
+            return None
+        x = x_offset + np.arange(nx) * dx
+        omega = np.linspace(omega_min, omega_max, n_omega)
+        harmonic = omega / omega_L if omega_L > 0 else omega
+        return {
+            "x": x,
+            "omega": omega,
+            "harmonic": harmonic,
+            "power": power,
+            "omega_L": omega_L,
+        }
+    except (OSError, ValueError, KeyError):
+        return None
+
+
 def find_realpot_snapshots(output_dir):
     """Effective-KS-potential snapshots written by the ExactTDDFT binary."""
     return _find_snapshots(output_dir, "realpot_real_")

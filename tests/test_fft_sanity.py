@@ -26,66 +26,102 @@ def main():
     dt = 0.1
     N = 4096
     t = np.arange(N) * dt
-    V_t = np.sin(omega * t)
 
-    # plot_ks_potential_fft renders a 2D pcolormesh on (harmonic, x) axes.
-    # We need nx > 1 for the y-axis to have non-zero extent. Replicate the
-    # same sin(omega·t) carrier across every spatial point so the resulting
-    # |F(x, ω)|² panel shows a uniform bright stripe at harmonic 1, dark
-    # everywhere else.
+    # Multi-harmonic signal: a fundamental at ω_L plus 2ω_L and 3ω_L
+    # with decreasing amplitudes — what V_KS looks like physically when
+    # the system radiates integer harmonics of the driving laser. The
+    # plot must show *three* sharp peaks at harmonic order 1, 2, 3.
+    A1, A2, A3 = 1.0, 0.3, 0.1
+    V_t = (
+        A1 * np.sin(omega * t)
+        + A2 * np.sin(2.0 * omega * t)
+        + A3 * np.sin(3.0 * omega * t)
+    )
+
+    # Same temporal signal at every spatial point → bright vertical
+    # stripes at harmonic 1, 2, 3.
     nx = 64
     dx = 0.4
-    spatial = np.ones(nx)
-    snaps = [(k, (V_t[k] * spatial).astype(complex)) for k in range(N)]
+
+    # Build the (x, ω) FFT grid the way ExactTDDFT.cc would, but in
+    # numpy so this test is independent of the C++ binary. Use the same
+    # online-integration formula:
+    #   F̂(x, ω_j) = Σ_n V(x, n·dt) · exp(-iω_j·n·dt) · dt
+    n_omega = 800
+    omega_min = 0.0
+    omega_max = 4.0 * omega
+    omegas = np.linspace(omega_min, omega_max, n_omega)
+    # exp(-i ω t)
+    phase = np.exp(-1j * np.outer(omegas, t)) * dt  # (n_omega, N)
+    spec = phase @ V_t  # (n_omega,)
+    power_1d = np.abs(spec) ** 2
+    power = np.tile(power_1d, (nx, 1))  # (nx, n_omega)
+
+    x_axis = (np.arange(nx) - nx / 2 + 0.5) * dx
+    fft_data = {
+        "x": x_axis,
+        "omega": omegas,
+        "harmonic": omegas / omega,
+        "power": power,
+        "omega_L": omega,
+    }
 
     fig, ax = plt.subplots(figsize=(6, 3))
     plot_ks_potential_fft(
         ax,
-        snaps,
-        dx=dx,
-        nx=nx,
-        dt_snapshot=dt,
-        laser_freq=omega,
-        plateau_skip_frac=0.0,
-        harmonic_max=2.5,
+        fft_data,
+        title="sanity: sin(ωt) + 0.3 sin(2ωt) + 0.1 sin(3ωt) — peaks at h=1,2,3",
+        harmonic_min=0.0,
+        harmonic_max=4.0,
         vmin_orders=5,
-        title="sanity: sin(10 t), dt=0.1 — expect bright stripe at harmonic 1",
     )
 
-    # Re-run the FFT logic the plotter uses, on its own, so we can read
-    # the peak position numerically.
-    series = V_t - V_t.mean()
-    n = len(series)
-    win = 0.5 * (1.0 - np.cos(2.0 * np.pi * np.arange(n) / max(n - 1, 1)))
-    spec = np.fft.rfft(series * win)
-    freqs = np.fft.rfftfreq(n, d=dt) * 2.0 * np.pi
-    harmonic = freqs / omega
-    power = np.abs(spec) ** 2
+    # Numerical readout (use the same integral the C++ accumulator does).
+    harmonic = omegas / omega
+    power = power_1d
 
-    peak = int(np.argmax(power))
-    nyq_omega = np.pi / dt
+    # Find the three local maxima nearest the expected harmonic positions.
+    def peak_near(h_target, half_window=0.05):
+        mask = np.abs(harmonic - h_target) < half_window
+        idxs = np.where(mask)[0]
+        if len(idxs) == 0:
+            return None, 0.0
+        local = idxs[np.argmax(power[idxs])]
+        return harmonic[local], power[local]
+
+    h1, p1 = peak_near(1.0)
+    h2, p2 = peak_near(2.0)
+    h3, p3 = peak_near(3.0)
+    pmax = max(p1, p2, p3)
+    print("Detected harmonic peaks:")
     print(
-        f"Nyquist angular ω = {nyq_omega:.3f}  "
-        f"(harmonic Nyquist {nyq_omega/omega:.2f})"
+        f"   h=1: harmonic={h1:.4f}  |F|^2/max={p1/pmax:.4f}  (expect 1.000)"
     )
-    print("Peak power at:")
-    print(f"   ω         = {freqs[peak]:.4f} a.u.   (expected {omega:.4f})")
-    print(f"   harmonic  = {harmonic[peak]:.4f}        (expected 1.0000)")
-    top = np.argsort(power)[::-1][:5]
-    print("Top 5 bins (harmonic, |F|^2 / max):")
-    for i in top:
-        print(f"   {harmonic[i]:.4f}   {power[i] / power.max():.4f}")
+    print(
+        f"   h=2: harmonic={h2:.4f}  |F|^2/max={p2/pmax:.4f}  (expect ~0.090)"
+    )
+    print(
+        f"   h=3: harmonic={h3:.4f}  |F|^2/max={p3/pmax:.4f}  (expect ~0.010)"
+    )
 
     out = _HERE / "fft_sanity.png"
     fig.tight_layout()
     fig.savefig(out, dpi=100)
     print(f"saved {out}")
 
-    # Hard assertions so this works as a regression test too.
-    assert (
-        abs(harmonic[peak] - 1.0) < 1e-3
-    ), f"peak at harmonic {harmonic[peak]:.4f}, expected 1.0"
-    print("PASS")
+    # Regression assertions: all three peaks must be in the right place
+    # AND the relative amplitudes must roughly track A1:A2:A3 = 1:0.3:0.1.
+    assert h1 is not None and abs(h1 - 1.0) < 0.05, f"h=1 missing or off: {h1}"
+    assert h2 is not None and abs(h2 - 2.0) < 0.05, f"h=2 missing or off: {h2}"
+    assert h3 is not None and abs(h3 - 3.0) < 0.05, f"h=3 missing or off: {h3}"
+    # |F|^2 ratio expected ≈ A_n^2 → 1 : 0.09 : 0.01.
+    ratio_h2 = p2 / p1
+    ratio_h3 = p3 / p1
+    assert 0.05 < ratio_h2 < 0.15, f"h=2 amplitude ratio off: {ratio_h2:.3f}"
+    assert 0.005 < ratio_h3 < 0.02, f"h=3 amplitude ratio off: {ratio_h3:.4f}"
+    print(
+        "PASS — all three integer-harmonic peaks present at the right ratios."
+    )
 
 
 if __name__ == "__main__":

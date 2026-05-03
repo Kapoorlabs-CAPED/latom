@@ -166,39 +166,25 @@ def plot_wavefunction_2d(ax, wf, dx, dy, nx, ny, vmin_orders=7):
 
 def plot_ks_potential_fft(
     ax,
-    snapshots,
-    dx,
-    nx,
-    dt_snapshot,
-    laser_freq,
-    plateau_skip_frac=0.0,
-    plateau_end_frac=1.0,
+    fft_data,
     title=None,
+    harmonic_min=0.0,
     harmonic_max=2.5,
-    vmin_orders=5,
+    vmin_orders=4,
     cmap="hot_r",
 ):
     """Plot |V_KS(x, ω)|² as a 2D log-scale contour.
 
-    Layout matches the paper figures: y-axis is the spatial coordinate x,
-    x-axis is the harmonic order ω/ω_L. The colour shows the log_10 of the
-    spectrum normalised to its peak, spanning vmin_orders orders of
-    magnitude.
+    Reads pre-computed FFT data produced online by ExactTDDFT.cc — no
+    Python-side FFT, so there's no aliasing from snapshot cadence.
 
     Args:
         ax: Matplotlib Axes.
-        snapshots: list of (t_index, complex_array_len_nx) tuples.
-        dx: grid spacing in x.
-        nx: number of x grid points.
-        dt_snapshot: time step *between* snapshots (= real_dt * wf_every).
-        laser_freq: ω_L of the driving laser (a.u.); used to convert ω
-            to harmonic order ω/ω_L.
-        plateau_skip_frac: drop this leading fraction of snapshots
-            (the ramp-up) before FFT.
+        fft_data: dict from ``parser.parse_vks_fft``, with keys
+            ``x``, ``omega``, ``harmonic``, ``power``, ``omega_L``.
         title: optional axes title.
-        harmonic_max: x-axis upper bound in units of ω/ω_L.
-        vmin_orders: dynamic range of the colour map (orders of
-            magnitude below the peak).
+        harmonic_min, harmonic_max: x-axis range in units of ω/ω_L.
+        vmin_orders: orders of magnitude below the peak shown by colour.
         cmap: matplotlib colormap name.
     """
     # Drop any previous colorbar to avoid stacking on repeated refreshes.
@@ -209,86 +195,39 @@ def plot_ks_potential_fft(
             pass
         del ax._latom_cbar
     ax.clear()
-    if not snapshots:
-        ax.set_title("No KS potential snapshots yet")
+    if fft_data is None:
+        ax.set_title("vks_fft.dat not found yet (waiting for run to finish)")
         return
 
-    # Drop the "final" sentinel (-1) — duplicates the last numbered frame.
-    snaps = [(t, p) for t, p in snapshots if t != -1 and p is not None]
-    snaps.sort(key=lambda tp: tp[0])
-    if len(snaps) < 8:
-        ax.set_title(f"Need ≥8 snapshots for FFT (have {len(snaps)})")
-        return
-
-    # Stack snapshots into V[time, x] (real part — V_KS is real-valued;
-    # any imaginary component is numerical noise).
-    V = np.stack([np.asarray(arr).real for _, arr in snaps], axis=0)
-    if V.shape[1] < nx:
-        nx = V.shape[1]
-
-    # Window to the periodic plateau only — drop ramp-up at the front
-    # and ramp-down at the tail. ``plateau_skip_frac`` is the fraction
-    # of total snapshots before the plateau starts;
-    # ``plateau_end_frac`` is the fraction at which the plateau ends.
-    n_total = V.shape[0]
-    start = int(round(plateau_skip_frac * n_total))
-    end = int(round(plateau_end_frac * n_total))
-    end = max(end, start + 8)  # need at least 8 samples for FFT
-    end = min(end, n_total)
-    V = V[start:end, :]
-
-    # Per-column DC removal so ω=0 doesn't dominate.
-    V = V - V.mean(axis=0, keepdims=True)
-    nT = V.shape[0]
-    # Hann window over time suppresses leakage from the finite plateau.
-    win = 0.5 * (1.0 - np.cos(2.0 * np.pi * np.arange(nT) / max(nT - 1, 1)))
-    Vw = V * win[:, None]
-
-    spec = np.fft.rfft(Vw, axis=0)  # shape (nfreq, nx)
-    freqs = np.fft.rfftfreq(nT, d=dt_snapshot) * 2.0 * np.pi  # angular ω
-    if laser_freq <= 0:
-        # Defensive — fall back to absolute units if no laser ω given.
-        harmonic = freqs
-        xlabel = r"$\omega$ (a.u.)"
-    else:
-        harmonic = freqs / float(laser_freq)
-        xlabel = r"Harmonic order $\omega/\omega_L$"
-
-    power = np.abs(spec) ** 2
+    x = fft_data["x"]
+    harmonic = fft_data["harmonic"]
+    power = np.asarray(fft_data["power"])  # shape (nx, n_omega)
     pmax = power.max()
     if pmax <= 0:
-        ax.set_title("KS potential FFT is identically zero")
+        ax.set_title("V_KS FFT is identically zero")
         return
-    power_norm = np.clip(power / pmax, 1e-30, None)
-    log_power = np.log10(power_norm)
+    log_power = np.log10(np.clip(power / pmax, 10 ** (-vmin_orders - 2), None))
 
-    coords = (np.arange(nx) - nx / 2 + 0.5) * dx
-
-    keep = harmonic <= harmonic_max
-
-    # Layout: y = x position, x = harmonic order.  Transpose log_power so
-    # that the first axis (rows) is x and the second axis (cols) is ω.
+    keep = (harmonic >= harmonic_min) & (harmonic <= harmonic_max)
     im = ax.pcolormesh(
         harmonic[keep],
-        coords,
-        log_power[keep, :].T,
+        x,
+        log_power[:, keep],
         vmin=-vmin_orders,
         vmax=0.0,
         cmap=cmap,
         shading="auto",
     )
-    ax.set_xlabel(xlabel)
+    ax.set_xlabel(r"Harmonic order $\omega / \omega_L$")
     ax.set_ylabel("x (a.u.)")
     ax.set_title(
         title or r"$\log_{10}|\hat V_{\mathrm{KS}}(x,\omega)|^2$ (norm.)"
     )
-    ax.set_xlim(0.0, harmonic_max)
-    ax.set_ylim(coords[0], coords[-1])
+    ax.set_xlim(harmonic_min, harmonic_max)
+    ax.set_ylim(x[0], x[-1])
 
     cbar = ax.figure.colorbar(im, ax=ax, fraction=0.046, pad=0.04)
     cbar.set_label(r"$\log_{10}(|\hat V|^2 / \max)$")
-    # Display orientation: -5 at the TOP (white), 0 at the BOTTOM (black).
-    cbar.ax.invert_yaxis()
     ax._latom_cbar = cbar
 
 
@@ -588,16 +527,16 @@ def plot_linear_response_spectrum(ax, data, ground_energy=None, dt=None):
 
     if ground_energy is not None:
         # Show absolute energy E_n = E_0 + omega
-        energies = ground_energy + omega
+        energies = abs(ground_energy) + omega
         ax.semilogy(energies, spectrum, "b-", linewidth=0.5)
         ax.set_xlabel("Energy (a.u.)")
         ax.set_title("Linear Response Spectrum (absolute energies)")
         ax.axvline(
-            x=ground_energy,
+            x=abs(ground_energy),
             color="r",
             linestyle="--",
             alpha=0.5,
-            label=f"$E_0$ = {ground_energy:.3f}",
+            label=f"$E_0$ = {abs(ground_energy):.3f}",
         )
         ax.legend(fontsize=8)
     else:

@@ -134,6 +134,23 @@ def run_simulation(config, work_dir, solver_dir=None, on_output=None):
     # Ensure work directory exists — solver writes all files here
     work_dir.mkdir(parents=True, exist_ok=True)
 
+    # Wipe stale per-step snapshots from any prior run. The C++ writes
+    # files indexed by timestep, but the cadence (wf_every / ks_every)
+    # can differ between runs — without this cleanup, files from the
+    # previous run at non-overlapping step numbers persist and pollute
+    # the next FFT / live-snapshot view. Ground-state files (wf_ground,
+    # wf_heliumplus, ks_ground) and observable logs are preserved.
+    for pattern in (
+        "wf_real_*.dat",
+        "ks_real_*.dat",
+        "realpot_real_*.dat",
+    ):
+        for old in work_dir.glob(pattern):
+            try:
+                old.unlink()
+            except OSError:
+                pass
+
     # Write config file, overriding output_dir to "." since cwd is work_dir
     config_path = work_dir / "simulation.cfg"
     config.output_dir = "."

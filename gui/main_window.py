@@ -11,11 +11,11 @@ if _scripts_dir not in sys.path:
 
 from parser import (  # noqa: E402
     find_ks_snapshots,
-    find_realpot_snapshots,
     find_wf_snapshots,
     parse_imag_observables,
     parse_orbital_1d,
     parse_real_observables,
+    parse_vks_fft,
     parse_wavefunction,
 )
 
@@ -941,16 +941,68 @@ class MainWindow(QMainWindow):
                 w.blockSignals(False)
 
     def _apply_paper_case(self, key):
-        """Write a paper-case preset into the Exact-TDDFT tab and switch."""
+        """Write a paper-case preset into BOTH parameter tabs and switch
+        to the Exact-TDDFT tab.
+
+        Every widget in every parameter tab that the case touches
+        (pulse_shape, ω, E, ramp/plateau/rampdown, real_dt, real_steps)
+        is updated to match. ``real_steps`` is auto-derived from the
+        case's pulse duration and the tab's current ``real_dt`` — the
+        same value the batch will run with, so the GUI never lies about
+        what the simulation will do.
+        """
         case = self._PAPER_CASES[key]
-        widgets = self._tab_widgets["exact_tddft"]
-        for field, value in case.items():
-            if field == "label" or field not in widgets:
-                continue
-            self._write_widget(widgets[field], value)
+
+        # Reference real_dt is taken from the Exact-TDDFT tab; use it
+        # for both tabs so they end up showing the same auto real_steps.
+        ref_widgets = self._tab_widgets["exact_tddft"]
+        if "real_dt" in ref_widgets:
+            real_dt = float(self._read_widget(ref_widgets["real_dt"]))
+        else:
+            real_dt = float(self.config.real_dt)
+
+        steps = self._real_steps_for_pulse(
+            case.get("laser_pulse_shape", "sinusoidal"),
+            case["laser_freq"],
+            case.get("laser_cycles", 0.0),
+            case.get("laser_ramp_cycles", 0.0),
+            case.get("laser_plateau_cycles", 0.0),
+            real_dt,
+            case.get("laser_rampdown_cycles", 0.0),
+        )
+
+        # Apply to BOTH tabs so whichever one the user looks at next
+        # shows the case-driven values.
+        for mode in ("tdse", "exact_tddft"):
+            widgets = self._tab_widgets.get(mode, {})
+            for field, value in case.items():
+                if field == "label" or field not in widgets:
+                    continue
+                self._write_widget(widgets[field], value)
+            if steps > 0 and "real_steps" in widgets:
+                self._write_widget(widgets["real_steps"], steps)
+            if "real_dt" in widgets:
+                self._write_widget(widgets["real_dt"], real_dt)
+
+        # Mirror to the per-card override spins; reset the user-set flag
+        # so further real_dt changes can keep auto-tracking the new case.
+        ovr = self._paper_case_overrides.get(key)
+        if ovr is not None and steps > 0:
+            ovr["real_steps_user_set"] = False
+            ovr["real_steps"].blockSignals(True)
+            ovr["real_steps"].setValue(steps)
+            ovr["real_steps"].blockSignals(False)
+            ovr["real_dt"].blockSignals(True)
+            ovr["real_dt"].setValue(real_dt)
+            ovr["real_dt"].blockSignals(False)
+
+        # Card text labels reflect the new state.
+        self._refresh_paper_case_cards()
+
         self.mode_tabs.setCurrentIndex(1)
         self._log(
-            f"Loaded paper preset: {case['label']}. Click Run to launch."
+            f"Loaded {case['label']}: real_steps auto-set to {steps} "
+            f"(real_dt={real_dt:g}). Click Run to launch."
         )
 
     def _current_mode(self):
@@ -1261,7 +1313,9 @@ class MainWindow(QMainWindow):
         self._lbl_wf_snap.setText("Waiting for snapshots...")
         self.btn_run.setEnabled(False)
         self.btn_stop.setEnabled(True)
-        self.progress_bar.setRange(0, 0)  # indeterminate while running
+        # Determinate bar — _poll_outputs computes percent = t_now/T_total.
+        self.progress_bar.setRange(0, 100)
+        self._set_progress(0, "Starting simulation…")
         self._log("Starting simulation...")
 
         self._sim_worker = SimulationWorker(self.config, str(self.work_dir))
@@ -1472,6 +1526,12 @@ class MainWindow(QMainWindow):
         self.btn_stop.setEnabled(True)
         self.progress_bar.setRange(0, 100)
         self._set_progress(0, f"Launching batch ({len(parallel_jobs)} cases)…")
+        # Start the batch poller so the progress bar is driven by real
+        # propagation time, not just by case-completion count.
+        if not hasattr(self, "_batch_poll_timer"):
+            self._batch_poll_timer = QTimer(self)
+            self._batch_poll_timer.timeout.connect(self._poll_batch_progress)
+        self._batch_poll_timer.start(2000)
         self._batch_worker = BatchSimulationWorker(
             parallel_jobs,
             preflight=preflight,
@@ -1500,12 +1560,46 @@ class MainWindow(QMainWindow):
         self._log(msg)
         self.btn_run.setEnabled(True)
         self.btn_stop.setEnabled(False)
+        if hasattr(self, "_batch_poll_timer"):
+            self._batch_poll_timer.stop()
         self.progress_bar.setRange(0, 100)
         self._set_progress(100 if success else 0, msg)
         self._refresh_paper_fft_comparison()
         self._populate_view_dropdown_from_batch()
         if not success:
             QMessageBox.warning(self, "Batch incomplete", msg)
+
+    def _poll_batch_progress(self):
+        """Aggregate progress across all running batch cases.
+
+        For each case dir, read the latest simulation time from
+        obser_laser.dat and divide by that case's total propagation time.
+        Overall percentage = average of the per-case fractions, weighted
+        by total time so a long case carries more weight.
+        """
+        if not getattr(self, "_batch_dirs", None):
+            return
+        total_T = 0.0
+        elapsed_T = 0.0
+        per_case = []
+        for case_key, work_dir in self._batch_dirs.items():
+            cfg = self._batch_cfgs.get(case_key)
+            if cfg is None:
+                continue
+            T_total = float(cfg.real_dt) * float(cfg.real_steps)
+            if T_total <= 0:
+                continue
+            t_now = self._last_sim_time(work_dir, cfg.obser_file)
+            t_now = max(0.0, min(t_now, T_total))
+            total_T += T_total
+            elapsed_T += t_now
+            per_case.append((case_key, t_now, T_total))
+        if total_T <= 0:
+            return
+        pct = 100.0 * elapsed_T / total_T
+        # Build a compact per-case status string.
+        bits = ", ".join(f"{k}={tn:.0f}/{tT:.0f}" for k, tn, tT in per_case)
+        self._set_progress(pct, f"batch {pct:.1f}% — {bits} a.u.")
 
     def _refresh_paper_fft_comparison(self):
         """Render |V_KS(x,ω)|² for each finished case into the 1×3 panel."""
@@ -1532,27 +1626,18 @@ class MainWindow(QMainWindow):
                     va="center",
                 )
                 continue
-            rp_snaps = find_realpot_snapshots(out_dir)
-            rp_data = []
-            for ts, path in rp_snaps:
-                arr = parse_orbital_1d(path, cfg.grid_nx)
-                if arr is not None:
-                    rp_data.append((ts, arr))
-            dt_snap = float(cfg.real_dt) * float(
-                cfg.ks_every if cfg.ks_every > 0 else cfg.wf_every
+            # FFT data was accumulated online by ExactTDDFT.cc into
+            # vks_fft.dat; just read and render it. No Python FFT.
+            fft_data = parse_vks_fft(
+                out_dir / getattr(cfg, "vks_fft_file", "vks_fft.dat")
             )
-            # FFT the FULL V_KS(x, t) timeline — ramp-up, plateau, and
-            # ramp-down all included.
             plot_ks_potential_fft(
                 ax,
-                rp_data,
-                cfg.grid_dx,
-                cfg.grid_nx,
-                dt_snap,
-                laser_freq=float(cfg.laser_freq),
-                harmonic_max=2.5,
-                vmin_orders=5,
+                fft_data,
                 title=self._PAPER_CASES[key]["label"],
+                harmonic_min=0.0,
+                harmonic_max=2.5,
+                vmin_orders=4,
             )
         c.draw_idle()
 
@@ -1645,9 +1730,50 @@ class MainWindow(QMainWindow):
                 break
         return excited_imag
 
+    @staticmethod
+    def _last_sim_time(work_dir, obser_file="obser_laser.dat"):
+        """Cheap tail-read of the simulation time from the obser log.
+
+        Returns 0.0 if the file doesn't exist yet or is unreadable. The
+        first column of obser_laser.dat is the propagation time in a.u.
+        Reading just the last 4 KiB is enough — no need to parse the
+        whole file every poll tick.
+        """
+        path = Path(work_dir) / obser_file
+        try:
+            with open(path, "rb") as f:
+                f.seek(0, 2)
+                size = f.tell()
+                f.seek(max(0, size - 4096), 0)
+                tail = f.read().decode(errors="ignore")
+            for line in reversed(tail.strip().splitlines()):
+                line = line.strip()
+                if not line or line.startswith("#"):
+                    continue
+                tok = line.split()
+                if tok:
+                    return float(tok[0])
+        except (OSError, ValueError):
+            pass
+        return 0.0
+
     def _poll_outputs(self):
-        """Poll observable files and update live plots."""
+        """Poll observable files and update live plots + progress bar."""
         out = self._get_output_dir()
+
+        # Live progress for the active single run, if any.
+        if self._sim_worker is not None and self._sim_worker.isRunning():
+            t_now = self._last_sim_time(out, self.config.obser_file)
+            t_total = float(self.config.real_dt) * float(
+                self.config.real_steps
+            )
+            if t_total > 0:
+                pct = 100.0 * t_now / t_total
+                self._set_progress(
+                    pct,
+                    f"running… t = {t_now:.2f} / {t_total:.2f} a.u. "
+                    f"({pct:.1f}%)",
+                )
 
         imag_data = parse_imag_observables(out / self.config.obser_imag_file)
         real_data = parse_real_observables(out / self.config.obser_file)
@@ -1878,34 +2004,22 @@ class MainWindow(QMainWindow):
                     self._ks_snap_idx = len(ks_snaps) - 1
                 self._show_ks_snapshot(self._ks_snap_idx)
 
-            # KS potential FFT (Reproduce-Paper main panel).
-            rp_snaps = find_realpot_snapshots(out)
-            rp_data = []
-            for ts, path in rp_snaps:
-                arr = parse_orbital_1d(path, nx)
-                if arr is not None:
-                    rp_data.append((ts, arr))
-            # dt between dumped 1D KS / V_KS snapshots.
-            dt_snap = float(cfg.real_dt) * float(
-                cfg.ks_every if cfg.ks_every > 0 else cfg.wf_every
+            # KS potential FFT — read the file the C++ wrote online.
+            fft_data = parse_vks_fft(
+                out / getattr(cfg, "vks_fft_file", "vks_fft.dat")
             )
-            # FFT the FULL V_KS(x, t) timeline — ramp-up + plateau +
-            # ramp-down all included.
             c = self._canvases["KS Potential FFT"]
             plot_ks_potential_fft(
                 c.axes,
-                rp_data,
-                dx,
-                nx,
-                dt_snap,
-                laser_freq=float(cfg.laser_freq),
-                harmonic_max=2.5,
-                vmin_orders=5,
+                fft_data,
                 title=(
                     rf"$\log_{{10}}|\hat V_{{\mathrm{{KS}}}}(x,\omega)|^2$  "
                     rf"$\omega_L$={cfg.laser_freq:g}, "
                     rf"E={cfg.laser_alpha:g}"
                 ),
+                harmonic_min=0.0,
+                harmonic_max=2.5,
+                vmin_orders=4,
             )
             c.clear_and_draw()
 

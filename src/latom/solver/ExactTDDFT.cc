@@ -16,6 +16,8 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <cmath>
+#include <vector>
 
 // ============= Config (superset of TDSE.cc; unknown keys ignored) =============
 static long   cfg_ngpsx = 1500;
@@ -55,6 +57,14 @@ static long   cfg_heplus_imag_steps = 0;  // 0 -> reuse cfg_no_of_imag_timesteps
 
 // Constant A_0 used when laser_pulse_shape == "kick".
 static double cfg_kick_strength = 0.01;
+
+// Online FFT of V_KS(x, t) — accumulated at full real_dt resolution
+// during the real-time loop, dumped once at the end. No aliasing from
+// the wf_every / ks_every snapshot cadence.
+static long   cfg_fft_n_omega = 500;
+static double cfg_fft_harmonic_min = 0.0;
+static double cfg_fft_harmonic_max = 5.0;
+static char   cfg_vks_fft_file[512] = "vks_fft.dat";
 
 static char   cfg_output_dir[512]   = "res";
 static char   cfg_obser_file[512]   = "obser_laser.dat";
@@ -104,6 +114,10 @@ static void read_config(const char* filename)
       else if (strcmp(key, "load_ground") == 0)     cfg_load_ground = atoi(value);
       else if (strcmp(key, "heplus_imag_steps") == 0) cfg_heplus_imag_steps = atol(value);
       else if (strcmp(key, "kick_strength") == 0)   cfg_kick_strength = atof(value);
+      else if (strcmp(key, "fft_n_omega") == 0)     cfg_fft_n_omega = atol(value);
+      else if (strcmp(key, "fft_harmonic_min") == 0) cfg_fft_harmonic_min = atof(value);
+      else if (strcmp(key, "fft_harmonic_max") == 0) cfg_fft_harmonic_max = atof(value);
+      else if (strcmp(key, "vks_fft_file") == 0)    snprintf(cfg_vks_fft_file, sizeof(cfg_vks_fft_file), "%s", value);
       else if (strcmp(key, "output_dir") == 0)      snprintf(cfg_output_dir, sizeof(cfg_output_dir), "%s", value);
       else if (strcmp(key, "obser_file") == 0)      snprintf(cfg_obser_file, sizeof(cfg_obser_file), "%s", value);
       else if (strcmp(key, "obser_imag_file") == 0) snprintf(cfg_obser_imag_file, sizeof(cfg_obser_imag_file), "%s", value);
@@ -321,6 +335,32 @@ int main(int argc, char **argv)
   // as 1/(real_dt * ks_every)).
   long ks_every = (cfg_ks_output_every > 0) ? cfg_ks_output_every : cfg_wf_output_every;
 
+  // ============= Online FFT of V_KS(x, t) =============
+  //
+  // Accumulator: F_hat[ix * n_omega + j] += V_KS(x_ix, t) * exp(-iω_j t) * dt
+  //
+  // ω_j = (harmonic_min + j * (harmonic_max - harmonic_min)/(n_omega-1)) * ω_L
+  //
+  // Cost per step: O(N_x · N_ω). With 1500 × 500 ≈ 7.5e5 ops/step, this
+  // is negligible next to the Crank–Nicolson 2D solve. Total memory:
+  // 16 · N_x · N_ω bytes (≈ 12 MB for the defaults).
+  long n_omega = (cfg_fft_n_omega > 1) ? cfg_fft_n_omega : 1;
+  double omega_L_fft = cfg_laser_freq;
+  double omega_min_fft = cfg_fft_harmonic_min * omega_L_fft;
+  double omega_max_fft = cfg_fft_harmonic_max * omega_L_fft;
+  double dom_fft = (n_omega > 1)
+      ? (omega_max_fft - omega_min_fft) / (double)(n_omega - 1)
+      : 0.0;
+  std::vector<double> omegas_fft(n_omega);
+  for (long j = 0; j < n_omega; j++) {
+    omegas_fft[j] = omega_min_fft + j * dom_fft;
+  }
+  std::vector<complex<double>> Fhat(size1d * (size_t)n_omega,
+                                    complex<double>(0.0, 0.0));
+  cout << "Online V_KS FFT: n_omega=" << n_omega
+       << "  ω range = [" << omega_min_fft << ", " << omega_max_fft
+       << "] a.u.  (harmonic 0..." << cfg_fft_harmonic_max << ")" << endl;
+
   for (long ts = 0; ts < no_of_real; ts++) {
     double time = real_timestep * (double)ts;
 
@@ -344,6 +384,27 @@ int main(int argc, char **argv)
     lower.propagatedft( 0.5*timestep, time + 0.5*real(timestep), gone, hamiltonKS, me,
                        vecpotflag, zero1d, zero1d, charge);
     realpot = (upper / lower).alog(gone, real(timestep));
+
+    // 4) Accumulate the running FFT of V_KS(x, t) at full real_dt
+    //    resolution. dt is real(timestep), time is the current step time.
+    {
+      double dt_step = real(timestep);
+      double cur_time = time;
+      #pragma omp parallel for schedule(static)
+      for (long j = 0; j < n_omega; j++) {
+        double phase_arg = -omegas_fft[j] * cur_time;
+        complex<double> phase_dt = complex<double>(cos(phase_arg),
+                                                   sin(phase_arg)) * dt_step;
+        complex<double>* row = Fhat.data() + (size_t)j;  // stride-major over j
+        // Stride layout: F[ix, j] with ix outer; column-major access for j
+        // per ix is cache-friendly.
+        for (long ix = 0; ix < size1d; ix++) {
+          double v = real(realpot[ix]);
+          Fhat[(size_t)ix * (size_t)n_omega + (size_t)j] += v * phase_dt;
+        }
+        (void)row;
+      }
+    }
 
     counter_obs++;
     counter_wf++;
@@ -405,6 +466,38 @@ int main(int argc, char **argv)
   { FILE* f = fopen(snap_path, "w");
     if (f) { realpot.dump_to_file(gone, f, dumpingstepwidth); fclose(f); } }
 
+  // Dump the V_KS(x, ω) spectrum accumulated online. File format:
+  //   header line:  # nx dx x_offset n_omega omega_min omega_max omega_L
+  //   then nx lines, each with n_omega doubles = |F[ix, j]|^2.
+  {
+    char fft_path[1024];
+    snprintf(fft_path, sizeof(fft_path), "%s/%s",
+             cfg_output_dir, cfg_vks_fft_file);
+    FILE* f = fopen(fft_path, "w");
+    if (f) {
+      double x_offset = (-(double)size1d / 2.0 + 0.5) * deltx;
+      fprintf(f,
+              "# nx=%ld dx=%.14e x_offset=%.14e n_omega=%ld "
+              "omega_min=%.14e omega_max=%.14e omega_L=%.14e\n",
+              size1d, deltx, x_offset, n_omega,
+              omega_min_fft, omega_max_fft, omega_L_fft);
+      for (long ix = 0; ix < size1d; ix++) {
+        for (long j = 0; j < n_omega; j++) {
+          complex<double> z = Fhat[(size_t)ix * (size_t)n_omega + (size_t)j];
+          double power = real(z) * real(z) + imag(z) * imag(z);
+          fprintf(f, "%.8e ", power);
+        }
+        fputc('\n', f);
+      }
+      fclose(f);
+      cout << "V_KS(x, ω) FFT written to " << fft_path
+           << " (" << size1d << "×" << n_omega << ")" << endl;
+    } else {
+      cerr << "WARNING: could not open " << fft_path
+           << " for writing." << endl;
+    }
+  }
+
   fclose(file_obser);
 
   cout << me << ": ExactTDDFT done." << endl;
@@ -432,13 +525,19 @@ double vecpot_x(double time, int me)
     double T_up     = cfg_laser_ramp_cycles     * T_period;
     double T_const  = cfg_laser_plateau_cycles  * T_period;
     double T_down   = cfg_laser_rampdown_cycles * T_period;
-    double env;
-    if (T_up > 0 && time < T_up) {
-      env = time / T_up;
+    double env = 0.0;
+    // Phase 1: ramp-up.   0 <= t < T_up
+    // Phase 2: plateau.   T_up <= t < T_up + T_const
+    // Phase 3: ramp-down. T_up + T_const <= t < T_up + T_const + T_down
+    // Phase 4: laser off. t >= T_up + T_const + T_down
+    if (time < T_up) {
+      env = (T_up > 0.0) ? time / T_up : 1.0;
     } else if (time < T_up + T_const) {
       env = 1.0;
-    } else if (T_down > 0 && time < T_up + T_const + T_down) {
-      env = 1.0 - (time - T_up - T_const) / T_down;
+    } else if (time >= T_up + T_const &&
+               time <  T_up + T_const + T_down &&
+               T_down > 0.0) {
+      env = 1.0 - (time - (T_up + T_const)) / T_down;
     } else {
       env = 0.0;
     }

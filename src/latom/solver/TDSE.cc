@@ -611,13 +611,19 @@ double vecpot_x(double time, int me)
     double T_up     = cfg_laser_ramp_cycles     * T_period;
     double T_const  = cfg_laser_plateau_cycles  * T_period;
     double T_down   = cfg_laser_rampdown_cycles * T_period;
-    double env;
-    if (T_up > 0 && time < T_up) {
-      env = time / T_up;
+    double env = 0.0;
+    // Phase 1: ramp-up.   0 <= t < T_up
+    // Phase 2: plateau.   T_up <= t < T_up + T_const
+    // Phase 3: ramp-down. T_up + T_const <= t < T_up + T_const + T_down
+    // Phase 4: laser off. t >= T_up + T_const + T_down
+    if (time < T_up) {
+      env = (T_up > 0.0) ? time / T_up : 1.0;
     } else if (time < T_up + T_const) {
       env = 1.0;
-    } else if (T_down > 0 && time < T_up + T_const + T_down) {
-      env = 1.0 - (time - T_up - T_const) / T_down;
+    } else if (time >= T_up + T_const &&
+               time <  T_up + T_const + T_down &&
+               T_down > 0.0) {
+      env = 1.0 - (time - (T_up + T_const)) / T_down;
     } else {
       env = 0.0;
     }

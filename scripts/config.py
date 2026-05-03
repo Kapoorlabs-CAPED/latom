@@ -36,6 +36,14 @@ class SimulationConfig:
     # comfortably covers harmonic 2.5.
     ks_every: int = 0
 
+    # Online V_KS(x, ω) FFT — accumulated at full real_dt resolution
+    # inside ExactTDDFT.cc and dumped to vks_fft.dat at simulation end.
+    # No aliasing or undersampling regardless of wf_every / ks_every.
+    fft_n_omega: int = 500
+    fft_harmonic_min: float = 0.0
+    fft_harmonic_max: float = 5.0
+    vks_fft_file: str = "vks_fft.dat"
+
     # Physics parameters
     ionization_box: int = 50
     init_type: int = 3
