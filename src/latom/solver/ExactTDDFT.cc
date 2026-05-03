@@ -28,6 +28,10 @@ static long   cfg_no_of_imag_timesteps = 1000;
 static long   cfg_no_of_real_timesteps = 20000;
 static int    cfg_obs_output_every = 1;
 static long   cfg_wf_output_every = 20000;
+// Cadence for the 1D KS-orbital and effective-potential files. They're
+// tiny compared to the 2D wavefunction, so we dump them more frequently
+// to satisfy Nyquist for the V_KS(x,ω) FFT. 0 means "use wf_every".
+static long   cfg_ks_output_every = 0;
 static int    cfg_box = 50;
 static int    cfg_init_type = 3;
 static double cfg_laser_freq = 1.556;
@@ -37,6 +41,7 @@ static double cfg_laser_cycles = 400.0;
 static char   cfg_laser_pulse_shape[64] = "sinusoidal";
 static double cfg_laser_ramp_cycles = 2.0;
 static double cfg_laser_plateau_cycles = 16.0;
+static double cfg_laser_rampdown_cycles = 0.0;
 // Carrier-envelope phase φ in radians. Carrier is sin(ωt − φ).
 static double cfg_laser_phi = 0.0;
 static double cfg_coulomb_eps = 1.0;
@@ -83,6 +88,7 @@ static void read_config(const char* filename)
       else if (strcmp(key, "real_steps") == 0)      cfg_no_of_real_timesteps = atol(value);
       else if (strcmp(key, "obs_every") == 0)       cfg_obs_output_every = atoi(value);
       else if (strcmp(key, "wf_every") == 0)        cfg_wf_output_every = atol(value);
+      else if (strcmp(key, "ks_every") == 0)        cfg_ks_output_every = atol(value);
       else if (strcmp(key, "ionization_box") == 0)  cfg_box = atoi(value);
       else if (strcmp(key, "init_type") == 0)       cfg_init_type = atoi(value);
       else if (strcmp(key, "laser_freq") == 0)      cfg_laser_freq = atof(value);
@@ -91,6 +97,7 @@ static void read_config(const char* filename)
       else if (strcmp(key, "laser_pulse_shape") == 0) snprintf(cfg_laser_pulse_shape, sizeof(cfg_laser_pulse_shape), "%s", value);
       else if (strcmp(key, "laser_ramp_cycles") == 0) cfg_laser_ramp_cycles = atof(value);
       else if (strcmp(key, "laser_plateau_cycles") == 0) cfg_laser_plateau_cycles = atof(value);
+      else if (strcmp(key, "laser_rampdown_cycles") == 0) cfg_laser_rampdown_cycles = atof(value);
       else if (strcmp(key, "laser_phi") == 0) cfg_laser_phi = atof(value);
       else if (strcmp(key, "coulomb_eps") == 0)     cfg_coulomb_eps = atof(value);
       else if (strcmp(key, "absorb_ampl") == 0)     cfg_absorb_ampl = atof(value);
@@ -307,7 +314,12 @@ int main(int argc, char **argv)
   char snap_path[1024];
   complex<double> timestep(real_timestep, 0.0);
   long no_of_real = cfg_no_of_real_timesteps;
-  long counter_obs = 0, counter_wf = 0;
+  long counter_obs = 0, counter_wf = 0, counter_ks = 0;
+  // Effective KS dump cadence — falls back to wf_every when the user
+  // hasn't set ks_every. The 1D KS / realpot files are tiny, so it's
+  // worth dumping them frequently (Nyquist for the V_KS(x,ω) FFT scales
+  // as 1/(real_dt * ks_every)).
+  long ks_every = (cfg_ks_output_every > 0) ? cfg_ks_output_every : cfg_wf_output_every;
 
   for (long ts = 0; ts < no_of_real; ts++) {
     double time = real_timestep * (double)ts;
@@ -335,6 +347,7 @@ int main(int argc, char **argv)
 
     counter_obs++;
     counter_wf++;
+    counter_ks++;
 
     if (counter_obs == cfg_obs_output_every) {
       complenerg = wf.energy(0.0, g, hamilton, me, masses,
@@ -359,20 +372,25 @@ int main(int argc, char **argv)
       counter_obs = 0;
     }
 
+    // 2D wavefunction dump (large file → coarser cadence).
     if (counter_wf == cfg_wf_output_every) {
       snprintf(snap_path, sizeof(snap_path), "%s/wf_real_%06ld.dat", cfg_output_dir, ts);
       FILE* f = fopen(snap_path, "w");
       if (f) { wf.dump_to_file(g, f, dumpingstepwidth); fclose(f); }
+      counter_wf = 0;
+    }
 
+    // 1D KS-orbital and effective-potential dumps (small files →
+    // dump as often as needed to satisfy Nyquist for the V_KS FFT).
+    if (counter_ks == ks_every) {
       snprintf(snap_path, sizeof(snap_path), "%s/ks_real_%06ld.dat", cfg_output_dir, ts);
-      f = fopen(snap_path, "w");
+      FILE* f = fopen(snap_path, "w");
       if (f) { kohnshamorbital.dump_to_file(gone, f, dumpingstepwidth); fclose(f); }
 
       snprintf(snap_path, sizeof(snap_path), "%s/realpot_real_%06ld.dat", cfg_output_dir, ts);
       f = fopen(snap_path, "w");
       if (f) { realpot.dump_to_file(gone, f, dumpingstepwidth); fclose(f); }
-
-      counter_wf = 0;
+      counter_ks = 0;
     }
   }
 
@@ -411,12 +429,19 @@ double vecpot_x(double time, int me)
 
   if (strcmp(cfg_laser_pulse_shape, "trapezoidal") == 0) {
     double T_period = 2.0 * M_PI / frequ;
-    double T_up     = cfg_laser_ramp_cycles    * T_period;
-    double T_const  = cfg_laser_plateau_cycles * T_period;
+    double T_up     = cfg_laser_ramp_cycles     * T_period;
+    double T_const  = cfg_laser_plateau_cycles  * T_period;
+    double T_down   = cfg_laser_rampdown_cycles * T_period;
     double env;
-    if (time < T_up)                env = time / T_up;
-    else if (time < T_up + T_const) env = 1.0;
-    else                            env = 0.0;
+    if (T_up > 0 && time < T_up) {
+      env = time / T_up;
+    } else if (time < T_up + T_const) {
+      env = 1.0;
+    } else if (T_down > 0 && time < T_up + T_const + T_down) {
+      env = 1.0 - (time - T_up - T_const) / T_down;
+    } else {
+      env = 0.0;
+    }
     return ampl * env * sin(frequ * time - phi);
   }
 

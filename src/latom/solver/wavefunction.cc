@@ -939,7 +939,10 @@ void wavefunction::do_cn_step_xy_muller(dcomplex timestep, double time, grid g, 
 
 
   // Calculate the rhs vector S_-x *this
-
+  // OpenMP: each yindex iteration writes a disjoint row of rhsone[],
+  // reads only start[], no cross-iteration dependency.
+  #pragma omp parallel for schedule(static) \
+    private(xindex, index, index_xp, index_xm)
   for (yindex=0; yindex<g.ngps_y(); yindex++)
     {
       xindex=0;
@@ -966,7 +969,9 @@ void wavefunction::do_cn_step_xy_muller(dcomplex timestep, double time, grid g, 
 	+((4.0+lambda)/6.0-llambda*vecpotwithprefactor)*start[index];
     }
 
-  // The matrix  S_+x
+  // The matrix  S_+x — solve loop uses rhsone_x/rhstwo_x scratch which
+  // is currently single-threaded. Parallelizing requires per-thread
+  // scratch buffers; tracked as a follow-up.
   for (yindex=0; yindex<g.ngps_y(); yindex++)
     {
       for (xindex=0; xindex<g.ngps_x(); xindex++)
@@ -1004,7 +1009,8 @@ void wavefunction::do_cn_step_xy_muller(dcomplex timestep, double time, grid g, 
 
 
   // Calculate the rhs vector S_-y *this
-
+  #pragma omp parallel for schedule(static) \
+    private(yindex, index, index_yp, index_ym)
   for (xindex=0; xindex<g.ngps_x(); xindex++)
     {
       yindex=0;
@@ -1067,6 +1073,8 @@ void wavefunction::do_cn_step_xy_muller(dcomplex timestep, double time, grid g, 
   bb=-FOT+0.5*imagitimestephalf*(2.0*oneoverhsquare);
 
   // ---------- W_-x
+  #pragma omp parallel for schedule(static) \
+    private(xindex, index, index_xp, index_xm)
   for (yindex=0; yindex<g.ngps_y(); yindex++)
     {
       xindex=0;
@@ -1160,6 +1168,8 @@ void wavefunction::do_cn_step_xy_muller(dcomplex timestep, double time, grid g, 
   bb=-FOT+0.5*imagitimestephalf*(2.0*oneoverhsquare);
 
   // ---------- W_-y
+  #pragma omp parallel for schedule(static) \
+    private(yindex, index, index_yp, index_ym)
   for (xindex=0; xindex<g.ngps_x(); xindex++)
     {
       yindex=0;
@@ -1243,8 +1253,9 @@ void wavefunction::do_cn_step_xy_muller(dcomplex timestep, double time, grid g, 
     };
 
   // ============================ exp(V(xy)) =================================
-
-
+      // Pointwise; trivially parallel.
+      #pragma omp parallel for schedule(static) \
+        private(xindex, yindex, index)
       for (xindex=0; xindex<g.ngps_x(); xindex++)
 	{
 	  for (yindex=0; yindex<g.ngps_y(); yindex++)
@@ -1263,6 +1274,8 @@ void wavefunction::do_cn_step_xy_muller(dcomplex timestep, double time, grid g, 
   bb=-FOT+0.5*imagitimestephalf*(2.0*oneoverhsquare);
 
   // ---------- W_-x
+  #pragma omp parallel for schedule(static) \
+    private(xindex, index, index_xp, index_xm)
   for (yindex=0; yindex<g.ngps_y(); yindex++)
     {
       xindex=0;
@@ -1355,6 +1368,8 @@ void wavefunction::do_cn_step_xy_muller(dcomplex timestep, double time, grid g, 
   bb=-FOT+0.5*imagitimestephalf*(2.0*oneoverhsquare);
 
   // ---------- W_-y
+  #pragma omp parallel for schedule(static) \
+    private(yindex, index, index_yp, index_ym)
   for (xindex=0; xindex<g.ngps_x(); xindex++)
     {
       yindex=0;
@@ -1448,7 +1463,8 @@ void wavefunction::do_cn_step_xy_muller(dcomplex timestep, double time, grid g, 
 
 
   // Calculate the rhs vector S_-x *this
-
+  #pragma omp parallel for schedule(static) \
+    private(xindex, index, index_xp, index_xm)
   for (yindex=0; yindex<g.ngps_y(); yindex++)
     {
       xindex=0;
@@ -1513,7 +1529,8 @@ void wavefunction::do_cn_step_xy_muller(dcomplex timestep, double time, grid g, 
 
 
   // Calculate the rhs vector S_-y *this
-
+  #pragma omp parallel for schedule(static) \
+    private(yindex, index, index_yp, index_ym)
   for (xindex=0; xindex<g.ngps_x(); xindex++)
     {
       yindex=0;

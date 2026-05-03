@@ -60,6 +60,17 @@ machinery into a shared library; provides a single interactive
 front-end that selects the operating mode at run time; and writes a
 single, plain-text configuration that is readable and diffable.
 
+The numerical kernel that `latom` exposes through this graphical
+front-end has previously been used to study Floquet structure
+extraction from real-time propagated wave functions
+[@Kapoor2012Floquet], the periodicity (and breakdown thereof) of the
+time-dependent Kohn–Sham equation in the Floquet regime
+[@Kapoor2013Periodicity], and autoionising-state dynamics within
+time-dependent density-functional theory [@Kapoor2016Autoionization].
+Re-packaging this kernel with an interactive front-end and a single
+unified configuration lowers the barrier for further work along these
+lines.
+
 # Numerical methods
 
 ## Time-dependent Schrödinger equation

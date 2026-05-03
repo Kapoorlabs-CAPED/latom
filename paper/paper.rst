@@ -79,6 +79,16 @@ interactive front-end that selects the operating mode at run time;
 and writes a single, plain-text configuration that is readable and
 diffable.
 
+The numerical kernel that ``latom`` exposes through this graphical
+front-end has previously been used to study Floquet structure
+extraction from real-time propagated wave functions [Kapoor2012Floquet]_,
+the periodicity (and breakdown thereof) of the time-dependent
+Kohn–Sham equation in the Floquet regime [Kapoor2013Periodicity]_, and
+autoionising-state dynamics within time-dependent density-functional
+theory [Kapoor2016Autoionization]_. Re-packaging this kernel with an
+interactive front-end and a single unified configuration lowers the
+barrier for further work along these lines.
+
 
 Numerical methods
 =================
@@ -230,3 +240,23 @@ References
    "Solution of time-independent Schrödinger equation by the
    imaginary time propagation method",
    *J. Comput. Phys.* **221**, 148 (2007).
+
+.. [Kapoor2012Floquet] V. Kapoor and D. Bauer,
+   "Floquet analysis of real-time wave functions without solving the
+   Floquet equation",
+   *Phys. Rev. A* **85**, 023407 (2012).
+   doi:`10.1103/PhysRevA.85.023407
+   <https://doi.org/10.1103/PhysRevA.85.023407>`_.
+
+.. [Kapoor2013Periodicity] V. Kapoor, M. Ruggenthaler, and D. Bauer,
+   "Periodicity of the time-dependent Kohn–Sham equation and the
+   Floquet theorem",
+   *Phys. Rev. A* **87**, 042521 (2013).
+   doi:`10.1103/PhysRevA.87.042521
+   <https://doi.org/10.1103/PhysRevA.87.042521>`_.
+
+.. [Kapoor2016Autoionization] V. Kapoor,
+   "Autoionization in time-dependent density-functional theory",
+   *Phys. Rev. A* **93**, 063408 (2016).
+   doi:`10.1103/PhysRevA.93.063408
+   <https://doi.org/10.1103/PhysRevA.93.063408>`_.

@@ -30,6 +30,11 @@ class SimulationConfig:
     # Output control
     obs_every: int = 1
     wf_every: int = 200
+    # Dump cadence for the 1D KS orbital + effective-potential files.
+    # 0 means "use wf_every". For Exact-TDDFT runs you want this small
+    # enough that π/(real_dt × ks_every) > 3·ω_L so the V_KS(x,ω) FFT
+    # comfortably covers harmonic 2.5.
+    ks_every: int = 0
 
     # Physics parameters
     ionization_box: int = 50
@@ -48,6 +53,7 @@ class SimulationConfig:
     laser_pulse_shape: str = "sinusoidal"
     laser_ramp_cycles: float = 2.0
     laser_plateau_cycles: float = 16.0
+    laser_rampdown_cycles: float = 0.0
     # Carrier-envelope phase φ (radians). Carrier is sin(ωt − φ).
     # Applies to sinusoidal and trapezoidal; ignored for kick.
     laser_phi: float = 0.0

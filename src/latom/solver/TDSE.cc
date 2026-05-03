@@ -33,6 +33,7 @@ static double cfg_laser_cycles = 400.0;
 static char   cfg_laser_pulse_shape[64] = "sinusoidal";
 static double cfg_laser_ramp_cycles = 2.0;
 static double cfg_laser_plateau_cycles = 16.0;
+static double cfg_laser_rampdown_cycles = 0.0;
 // Carrier-envelope phase φ, in radians. The carrier is sin(ωt − φ).
 // Applies to sinusoidal and trapezoidal pulse shapes; no effect on kick.
 static double cfg_laser_phi = 0.0;
@@ -87,6 +88,7 @@ static void read_config(const char* filename)
       else if (strcmp(key, "laser_pulse_shape") == 0) snprintf(cfg_laser_pulse_shape, sizeof(cfg_laser_pulse_shape), "%s", value);
       else if (strcmp(key, "laser_ramp_cycles") == 0) cfg_laser_ramp_cycles = atof(value);
       else if (strcmp(key, "laser_plateau_cycles") == 0) cfg_laser_plateau_cycles = atof(value);
+      else if (strcmp(key, "laser_rampdown_cycles") == 0) cfg_laser_rampdown_cycles = atof(value);
       else if (strcmp(key, "laser_phi") == 0) cfg_laser_phi = atof(value);
       else if (strcmp(key, "coulomb_eps") == 0) cfg_coulomb_eps = atof(value);
       else if (strcmp(key, "absorb_ampl") == 0) cfg_absorb_ampl = atof(value);
@@ -606,12 +608,19 @@ double vecpot_x(double time, int me)
 
   if (strcmp(cfg_laser_pulse_shape, "trapezoidal") == 0) {
     double T_period = 2.0 * M_PI / frequ;
-    double T_up     = cfg_laser_ramp_cycles    * T_period;
-    double T_const  = cfg_laser_plateau_cycles * T_period;
+    double T_up     = cfg_laser_ramp_cycles     * T_period;
+    double T_const  = cfg_laser_plateau_cycles  * T_period;
+    double T_down   = cfg_laser_rampdown_cycles * T_period;
     double env;
-    if (time < T_up)                env = time / T_up;
-    else if (time < T_up + T_const) env = 1.0;
-    else                            env = 0.0;
+    if (T_up > 0 && time < T_up) {
+      env = time / T_up;
+    } else if (time < T_up + T_const) {
+      env = 1.0;
+    } else if (T_down > 0 && time < T_up + T_const + T_down) {
+      env = 1.0 - (time - T_up - T_const) / T_down;
+    } else {
+      env = 0.0;
+    }
     return ampl * env * sin(frequ * time - phi);
   }
 

@@ -170,62 +170,126 @@ def plot_ks_potential_fft(
     dx,
     nx,
     dt_snapshot,
-    x_probe=0.0,
+    laser_freq,
     plateau_skip_frac=0.0,
+    plateau_end_frac=1.0,
     title=None,
+    harmonic_max=2.5,
+    vmin_orders=5,
+    cmap="hot_r",
 ):
-    """Plot the temporal FFT of V_KS(x_probe, t) over snapshot times.
+    """Plot |V_KS(x, ω)|² as a 2D log-scale contour.
 
-    Used by the Reproduce-Paper tab to visualise periodicity violation in
-    the exact KS potential.
+    Layout matches the paper figures: y-axis is the spatial coordinate x,
+    x-axis is the harmonic order ω/ω_L. The colour shows the log_10 of the
+    spectrum normalised to its peak, spanning vmin_orders orders of
+    magnitude.
 
     Args:
         ax: Matplotlib Axes.
-        snapshots: list of (t_index, complex_array_len_nx) tuples (sorted).
+        snapshots: list of (t_index, complex_array_len_nx) tuples.
         dx: grid spacing in x.
         nx: number of x grid points.
-        dt_snapshot: time step *between* snapshots (== real_dt * wf_every).
-        x_probe: x position (a.u.) at which to sample V_KS.
-        plateau_skip_frac: drop this fraction of leading snapshots (the
-            ramp-up region) before FFT.
+        dt_snapshot: time step *between* snapshots (= real_dt * wf_every).
+        laser_freq: ω_L of the driving laser (a.u.); used to convert ω
+            to harmonic order ω/ω_L.
+        plateau_skip_frac: drop this leading fraction of snapshots
+            (the ramp-up) before FFT.
         title: optional axes title.
+        harmonic_max: x-axis upper bound in units of ω/ω_L.
+        vmin_orders: dynamic range of the colour map (orders of
+            magnitude below the peak).
+        cmap: matplotlib colormap name.
     """
+    # Drop any previous colorbar to avoid stacking on repeated refreshes.
+    if hasattr(ax, "_latom_cbar"):
+        try:
+            ax._latom_cbar.remove()
+        except Exception:
+            pass
+        del ax._latom_cbar
     ax.clear()
     if not snapshots:
         ax.set_title("No KS potential snapshots yet")
         return
-    # Sort, drop the "final" sentinel (-1) since it duplicates the last frame.
-    snaps = [(t, p) for t, p in snapshots if t != -1]
+
+    # Drop the "final" sentinel (-1) — duplicates the last numbered frame.
+    snaps = [(t, p) for t, p in snapshots if t != -1 and p is not None]
     snaps.sort(key=lambda tp: tp[0])
     if len(snaps) < 8:
         ax.set_title(f"Need ≥8 snapshots for FFT (have {len(snaps)})")
         return
 
-    # Sample V_KS at x_probe across all snapshots.
+    # Stack snapshots into V[time, x] (real part — V_KS is real-valued;
+    # any imaginary component is numerical noise).
+    V = np.stack([np.asarray(arr).real for _, arr in snaps], axis=0)
+    if V.shape[1] < nx:
+        nx = V.shape[1]
+
+    # Window to the periodic plateau only — drop ramp-up at the front
+    # and ramp-down at the tail. ``plateau_skip_frac`` is the fraction
+    # of total snapshots before the plateau starts;
+    # ``plateau_end_frac`` is the fraction at which the plateau ends.
+    n_total = V.shape[0]
+    start = int(round(plateau_skip_frac * n_total))
+    end = int(round(plateau_end_frac * n_total))
+    end = max(end, start + 8)  # need at least 8 samples for FFT
+    end = min(end, n_total)
+    V = V[start:end, :]
+
+    # Per-column DC removal so ω=0 doesn't dominate.
+    V = V - V.mean(axis=0, keepdims=True)
+    nT = V.shape[0]
+    # Hann window over time suppresses leakage from the finite plateau.
+    win = 0.5 * (1.0 - np.cos(2.0 * np.pi * np.arange(nT) / max(nT - 1, 1)))
+    Vw = V * win[:, None]
+
+    spec = np.fft.rfft(Vw, axis=0)  # shape (nfreq, nx)
+    freqs = np.fft.rfftfreq(nT, d=dt_snapshot) * 2.0 * np.pi  # angular ω
+    if laser_freq <= 0:
+        # Defensive — fall back to absolute units if no laser ω given.
+        harmonic = freqs
+        xlabel = r"$\omega$ (a.u.)"
+    else:
+        harmonic = freqs / float(laser_freq)
+        xlabel = r"Harmonic order $\omega/\omega_L$"
+
+    power = np.abs(spec) ** 2
+    pmax = power.max()
+    if pmax <= 0:
+        ax.set_title("KS potential FFT is identically zero")
+        return
+    power_norm = np.clip(power / pmax, 1e-30, None)
+    log_power = np.log10(power_norm)
+
     coords = (np.arange(nx) - nx / 2 + 0.5) * dx
-    ix = int(np.argmin(np.abs(coords - x_probe)))
-    series = np.array([arr[ix].real for _, arr in snaps], dtype=float)
 
-    # Skip ramp-up so the FFT sees only the plateau region.
-    skip = int(round(plateau_skip_frac * len(series)))
-    if skip < len(series) - 8:
-        series = series[skip:]
+    keep = harmonic <= harmonic_max
 
-    series = series - series.mean()  # remove DC
-    n = len(series)
-    # Hann window suppresses spectral leakage given the finite plateau.
-    window = 0.5 * (1.0 - np.cos(2.0 * np.pi * np.arange(n) / max(n - 1, 1)))
-    spec = np.fft.rfft(series * window)
-    freqs = (
-        np.fft.rfftfreq(n, d=dt_snapshot) * 2.0 * np.pi
-    )  # angular freq (a.u.)
-    power = (np.abs(spec) ** 2) / max(np.max(np.abs(spec) ** 2), 1e-30)
+    # Layout: y = x position, x = harmonic order.  Transpose log_power so
+    # that the first axis (rows) is x and the second axis (cols) is ω.
+    im = ax.pcolormesh(
+        harmonic[keep],
+        coords,
+        log_power[keep, :].T,
+        vmin=-vmin_orders,
+        vmax=0.0,
+        cmap=cmap,
+        shading="auto",
+    )
+    ax.set_xlabel(xlabel)
+    ax.set_ylabel("x (a.u.)")
+    ax.set_title(
+        title or r"$\log_{10}|\hat V_{\mathrm{KS}}(x,\omega)|^2$ (norm.)"
+    )
+    ax.set_xlim(0.0, harmonic_max)
+    ax.set_ylim(coords[0], coords[-1])
 
-    ax.semilogy(freqs, power, "b-", linewidth=0.8)
-    ax.set_xlabel(r"$\omega$ (a.u.)")
-    ax.set_ylabel(r"$|\hat V_{\mathrm{KS}}(\omega)|^2$ (norm.)")
-    ax.set_title(title or rf"FFT of $V_{{\mathrm{{KS}}}}(x={x_probe:g}, t)$")
-    ax.grid(True, which="both", alpha=0.3)
+    cbar = ax.figure.colorbar(im, ax=ax, fraction=0.046, pad=0.04)
+    cbar.set_label(r"$\log_{10}(|\hat V|^2 / \max)$")
+    # Display orientation: -5 at the TOP (white), 0 at the BOTTOM (black).
+    cbar.ax.invert_yaxis()
+    ax._latom_cbar = cbar
 
 
 def plot_ks_orbital(ax, orbital, dx, nx, title=None):

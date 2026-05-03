@@ -1,6 +1,8 @@
 CXX = g++
-CXXFLAGS = -std=c++17 -O3 -funroll-all-loops -finline-functions -ffast-math -Wall -Wno-deprecated
-LDFLAGS = -lm
+# OpenMP for shared-memory parallelism of Crank-Nicolson sweeps.
+# Set OMP_NUM_THREADS at runtime to bound the core count; default = all cores.
+CXXFLAGS = -std=c++17 -O3 -funroll-all-loops -finline-functions -ffast-math -fopenmp -Wall -Wno-deprecated
+LDFLAGS = -lm -fopenmp
 
 SHARED_SOURCES = wavefunction.cc hamop.cc grid.cc fluid.cc
 SHARED_OBJECTS = $(SHARED_SOURCES:.cc=.o)

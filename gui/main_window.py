@@ -47,17 +47,21 @@ from PyQt5.QtWidgets import (  # noqa: E402
     QLabel,
     QMainWindow,
     QMessageBox,
+    QProgressBar,
     QPushButton,
     QScrollArea,
     QSpinBox,
     QSplitter,
     QTabWidget,
-    QTextEdit,
     QVBoxLayout,
     QWidget,
 )
 from runner import is_solver_built, is_solver_stale  # noqa: E402
-from workers import BuildWorker, SimulationWorker  # noqa: E402
+from workers import (  # noqa: E402
+    BatchSimulationWorker,
+    BuildWorker,
+    SimulationWorker,
+)
 
 
 class MainWindow(QMainWindow):
@@ -81,6 +85,10 @@ class MainWindow(QMainWindow):
         self._wf_snap_idx = -1  # index into _wf_snapshots currently displayed
         self._ks_snapshots = []
         self._ks_snap_idx = -1
+        # When non-None, plot tabs read from this dir + use this config
+        # (set by the View dropdown after a paper-batch run).
+        self._active_case_dir = None
+        self._active_case_cfg = None
         self._setup_ui()
         self._update_build_status()
 
@@ -114,11 +122,26 @@ class MainWindow(QMainWindow):
         left_layout.addWidget(scroll, stretch=1)
         left_layout.addWidget(self._make_controls_group())
 
-        self.log_text = QTextEdit()
-        self.log_text.setReadOnly(True)
-        self.log_text.setMaximumHeight(180)
-        self.log_text.setStyleSheet("font-family: monospace; font-size: 11px;")
-        left_layout.addWidget(self.log_text)
+        # Progress strip — replaces the previous (large) log textbox so the
+        # parameter panel above gets that vertical space. The latest one-line
+        # status message is shown above a percentage bar.
+        prog_row = QWidget()
+        prog_lay = QVBoxLayout(prog_row)
+        prog_lay.setContentsMargins(0, 0, 0, 0)
+        prog_lay.setSpacing(2)
+        self.status_label = QLabel("Idle.")
+        self.status_label.setStyleSheet(
+            "font-size: 11px; color: #444; font-family: monospace;"
+        )
+        self.status_label.setWordWrap(True)
+        prog_lay.addWidget(self.status_label)
+        self.progress_bar = QProgressBar()
+        self.progress_bar.setRange(0, 100)
+        self.progress_bar.setValue(0)
+        self.progress_bar.setTextVisible(True)
+        self.progress_bar.setMaximumHeight(16)
+        prog_lay.addWidget(self.progress_bar)
+        left_layout.addWidget(prog_row)
 
         left.setMaximumWidth(360)
         splitter.addWidget(left)
@@ -139,6 +162,7 @@ class MainWindow(QMainWindow):
             "Ground State KS Orbital",
             "Live KS Orbital",
             "KS Potential FFT",
+            "Paper FFT Comparison",
             "Live WF",
         ]
         # Tabs that are only meaningful in one mode. The others are shown
@@ -148,6 +172,7 @@ class MainWindow(QMainWindow):
             "Ground State KS Orbital",
             "Live KS Orbital",
             "KS Potential FFT",
+            "Paper FFT Comparison",
         )
         for name in tab_names:
             if name == "Live WF":
@@ -170,7 +195,12 @@ class MainWindow(QMainWindow):
                 self.tabs.addTab(container, name)
             else:
                 # "Excited States" manages its own subplot grid — no default axes
-                canvas = PlotCanvas(single_axes=(name != "Excited States"))
+                # "Excited States" and "Paper FFT Comparison" manage their
+                # own subplot grids — no default axes for those.
+                canvas = PlotCanvas(
+                    single_axes=name
+                    not in ("Excited States", "Paper FFT Comparison")
+                )
                 self._canvases[name] = canvas
                 self.tabs.addTab(canvas, name)
         self._apply_tab_visibility()
@@ -444,6 +474,18 @@ class MainWindow(QMainWindow):
         self._add_spin(
             g,
             widgets,
+            "laser_rampdown_cycles",
+            "Ramp-down cycles",
+            0.0,
+            1000.0,
+            getattr(cfg, "laser_rampdown_cycles", 0.0),
+            True,
+            decimals=2,
+            tooltip="Trapezoidal only. 0 = sharp cutoff after plateau.",
+        )
+        self._add_spin(
+            g,
+            widgets,
             "kick_strength",
             "Kick strength A₀",
             0.0,
@@ -507,7 +549,11 @@ class MainWindow(QMainWindow):
             "load_ground",
             "Load 2e ground state from file",
             cfg.load_ground,
-            "Load wf_ground.dat if present, else compute via imaginary-time.",
+            "Load wf_ground.dat if present, else compute via imaginary-time. "
+            "Synced across all tabs and used by the Reproduce-Paper batch.",
+        )
+        widgets["load_ground"].toggled.connect(
+            lambda checked: self._sync_load_ground(checked)
         )
         outer.addWidget(grp)
 
@@ -586,6 +632,37 @@ class MainWindow(QMainWindow):
     # Paper-reproduction cases. ω = laser_freq, E = laser_alpha (latom's
     # convention sets A_amp = alpha · omega, so passing E in laser_alpha
     # gives the paper's stated A_max = ω·E directly).
+    @staticmethod
+    def _pulse_total_time(shape, freq, cycles, ramp, plateau, rampdown=0.0):
+        """Return the total propagation time (a.u.) implied by the pulse.
+
+        - sinusoidal: ``cycles * (2π/ω)``
+        - trapezoidal: ``(ramp + plateau + rampdown) * (2π/ω)``
+        - kick: 0.0 — caller falls back to its own real_steps.
+        """
+        if freq <= 0:
+            return 0.0
+        period = 2.0 * 3.141592653589793 / freq
+        if shape == "trapezoidal":
+            return (float(ramp) + float(plateau) + float(rampdown)) * period
+        if shape == "sinusoidal":
+            return float(cycles) * period
+        return 0.0
+
+    @classmethod
+    def _real_steps_for_pulse(
+        cls, shape, freq, cycles, ramp, plateau, real_dt, rampdown=0.0
+    ):
+        """Number of real-time steps needed to cover the full pulse."""
+        if real_dt <= 0:
+            return 0
+        T = cls._pulse_total_time(shape, freq, cycles, ramp, plateau, rampdown)
+        if T <= 0:
+            return 0
+        return int(round(T / real_dt + 0.5))
+
+    # Paper cases use symmetric trapezoid by default: ramp-down = ramp-up.
+    # User can override per-card or in the laser group.
     _PAPER_CASES = {
         "case_1": dict(
             label="Case 1: low-ω (ω=0.056, E=0.063)",
@@ -594,6 +671,7 @@ class MainWindow(QMainWindow):
             laser_alpha=0.063,
             laser_ramp_cycles=2.0,
             laser_plateau_cycles=16.0,
+            laser_rampdown_cycles=2.0,
         ),
         "case_2": dict(
             label="Case 2: high-ω (ω=2.6, E=0.34)",
@@ -602,6 +680,7 @@ class MainWindow(QMainWindow):
             laser_alpha=0.34,
             laser_ramp_cycles=4.0,
             laser_plateau_cycles=172.0,
+            laser_rampdown_cycles=4.0,
         ),
         "case_3": dict(
             label="Case 3: resonant (ω=0.533, E=0.016)",
@@ -610,13 +689,14 @@ class MainWindow(QMainWindow):
             laser_alpha=0.016,
             laser_ramp_cycles=2.0,
             laser_plateau_cycles=148.0,
+            laser_rampdown_cycles=2.0,
         ),
     }
 
     def _make_mode_tabs_group(self):
         """Top-level tab widget: each tab is a self-contained mode.
 
-        Tabs 0/1 are the actual solver modes. Tab 2 (Reproduce Paper)
+        Tabs 0/1 are the actual solver modes. Tab 2 (Reproduce Periodicity Paper)
         contains preset buttons that configure tab 1 (Exact-TDDFT) with
         paper parameters and switch to it.
         """
@@ -628,38 +708,237 @@ class MainWindow(QMainWindow):
         self.mode_tabs.addTab(
             self._build_param_tab("exact_tddft"), "Exact-TDDFT"
         )
-        self.mode_tabs.addTab(self._build_reproduce_tab(), "Reproduce Paper")
+        self.mode_tabs.addTab(
+            self._build_reproduce_tab(), "Reproduce Periodicity Paper"
+        )
         idx = 1 if getattr(self.config, "mode", "tdse") == "exact_tddft" else 0
         self.mode_tabs.setCurrentIndex(idx)
         self.mode_tabs.currentChanged.connect(self._on_mode_changed)
         lay.addWidget(self.mode_tabs)
+
+        # Live refresh of the paper-case cards when real_dt changes in
+        # either parameter tab.
+        for mode in ("tdse", "exact_tddft"):
+            w = self._tab_widgets.get(mode, {}).get("real_dt")
+            if w is not None:
+                w.valueChanged.connect(
+                    lambda _v: self._refresh_paper_case_cards()
+                )
         return grp
 
     def _build_reproduce_tab(self):
-        """Tab with one button per paper case.
+        """Tab with one card per paper case.
 
-        Clicking a button writes the case's parameters into the
-        Exact-TDDFT tab's widgets and switches to that tab. The user then
-        clicks Run as usual — no separate runner.
+        Each card shows the case's pulse parameters and the derived
+        propagation time / real_steps for the *current* real_dt. Cards
+        update live when real_dt is edited in the Exact-TDDFT tab.
         """
         tab = QWidget()
         outer = QVBoxLayout(tab)
         outer.setContentsMargins(8, 8, 8, 8)
-        outer.addWidget(
-            QLabel(
-                "One-click presets for the paper's three KS-potential cases.\n"
-                "Each button loads ω, E, ramp-up and plateau into the\n"
-                "Exact-TDDFT tab (trapezoidal envelope), then switches to it."
-            )
+        outer.setSpacing(8)
+
+        header = QLabel(
+            "Reproduce three pulse-shape cases from <br>"
+            '<a href="https://journals.aps.org/pra/abstract/10.1103/PhysRevA.87.042521">'
+            "Phys. Rev. A 87, 042521 (2013)</a>."
         )
+        header.setOpenExternalLinks(True)
+        header.setStyleSheet("font-weight: 600;")
+        outer.addWidget(header)
+
+        sub = QLabel(
+            "Each case writes into latom_work/&lt;case&gt;/. real_steps "
+            "is auto-computed from each case's pulse duration so the "
+            "simulation stops exactly when the laser ends."
+        )
+        sub.setWordWrap(True)
+        sub.setStyleSheet("color: #555; font-size: 11px;")
+        outer.addWidget(sub)
+
+        # Case cards. Each card has:
+        #  - a description label (refreshed by _refresh_paper_case_cards)
+        #  - per-case real_dt and real_steps override spins. Default to
+        #    the values in the Exact-TDDFT tab and the auto-computed
+        #    real_steps respectively; user can edit either to override.
+        self._paper_case_labels = {}
+        self._paper_case_overrides = {}
         for key, case in self._PAPER_CASES.items():
-            btn = QPushButton(case["label"])
+            grp = QGroupBox(case["label"])
+            grp.setStyleSheet(
+                "QGroupBox { font-weight: 600; margin-top: 6px; }"
+                "QGroupBox::title { subcontrol-origin: margin;"
+                " left: 8px; padding: 0 4px; }"
+            )
+            v = QVBoxLayout(grp)
+            v.setContentsMargins(8, 6, 8, 6)
+            v.setSpacing(4)
+
+            info = QLabel("")
+            info.setTextFormat(Qt.RichText)
+            info.setWordWrap(True)
+            info.setStyleSheet("font-size: 11px;")
+            v.addWidget(info)
+            self._paper_case_labels[key] = info
+
+            # Override spins inline.
+            ovr_row = QWidget()
+            ovr_lay = QHBoxLayout(ovr_row)
+            ovr_lay.setContentsMargins(0, 0, 0, 0)
+            ovr_lay.addWidget(QLabel("real_dt:"))
+            spin_dt = QDoubleSpinBox()
+            spin_dt.setDecimals(4)
+            spin_dt.setRange(0.0001, 10.0)
+            spin_dt.setValue(self.config.real_dt)
+            spin_dt.setMaximumWidth(80)
+            ovr_lay.addWidget(spin_dt)
+            ovr_lay.addSpacing(8)
+            ovr_lay.addWidget(QLabel("real_steps:"))
+            spin_steps = QSpinBox()
+            spin_steps.setRange(1, 100_000_000)
+            spin_steps.setMaximumWidth(110)
+            ovr_lay.addWidget(spin_steps)
+            ovr_lay.addStretch()
+            v.addWidget(ovr_row)
+
+            self._paper_case_overrides[key] = {
+                "real_dt": spin_dt,
+                "real_steps": spin_steps,
+                "real_steps_user_set": False,
+            }
+
+            # When the user touches real_dt, the auto real_steps changes.
+            spin_dt.valueChanged.connect(
+                lambda _v, k=key: self._refresh_paper_case_cards()
+            )
+            # Mark real_steps as user-overridden so we stop auto-refilling.
+            spin_steps.valueChanged.connect(
+                lambda _v, k=key: self._mark_paper_steps_overridden(k)
+            )
+
+            btn = QPushButton("Load this case into Exact-TDDFT tab")
             btn.clicked.connect(
                 lambda _checked=False, k=key: self._apply_paper_case(k)
             )
-            outer.addWidget(btn)
+            v.addWidget(btn)
+
+            outer.addWidget(grp)
+
+        # Global "Load 2e ground state from file" toggle, mirrored across
+        # all three tabs.
+        chk = QCheckBox("Load 2e ground state from file (skip imag-time)")
+        chk.setChecked(bool(self.config.load_ground))
+        chk.setToolTip(
+            "If checked AND latom_work/wf_ground.dat (and the He+ / KS\n"
+            "ground orbitals) exist, the batch skips imag-time entirely\n"
+            "and copies those files into each case dir."
+        )
+        chk.toggled.connect(lambda checked: self._sync_load_ground(checked))
+        self._reproduce_load_ground_chk = chk
+        outer.addWidget(chk)
+
+        btn_all = QPushButton("Run all three cases (parallel)")
+        btn_all.setToolTip(
+            "Spawns three ExactTDDFT subprocesses concurrently. The Paper "
+            "FFT Comparison tab populates as cases complete; switch the "
+            "View dropdown to inspect any single case's full plot set."
+        )
+        btn_all.setStyleSheet(
+            "QPushButton { background-color: #2e7dd7; color: white;"
+            " font-weight: 600; padding: 6px; border-radius: 3px; }"
+            "QPushButton:hover { background-color: #245fb0; }"
+        )
+        btn_all.clicked.connect(self._on_run_paper_batch)
+        outer.addWidget(btn_all)
+
         outer.addStretch()
+        # Initial population.
+        self._refresh_paper_case_cards()
         return tab
+
+    def _refresh_paper_case_cards(self):
+        """Recompute the displayed total time / real_steps in each case
+        card using the current ``real_dt`` from the Exact-TDDFT tab."""
+        if not getattr(self, "_paper_case_labels", None):
+            return
+        # Pull real_dt live from the Exact-TDDFT tab; fall back to the
+        # config default if widgets aren't built yet.
+        try:
+            real_dt = float(
+                self._tab_widgets["exact_tddft"]["real_dt"].value()
+            )
+        except Exception:
+            real_dt = float(getattr(self.config, "real_dt", 0.1))
+
+        for key, case in self._PAPER_CASES.items():
+            shape = case.get("laser_pulse_shape", "trapezoidal")
+            freq = case["laser_freq"]
+            ramp = case.get("laser_ramp_cycles", 0.0)
+            plateau = case.get("laser_plateau_cycles", 0.0)
+            rampdown = case.get("laser_rampdown_cycles", 0.0)
+            E = case["laser_alpha"]
+            # Per-card override: read from the card's own real_dt spin
+            # if present, otherwise the global default.
+            card_real_dt = real_dt
+            if key in getattr(self, "_paper_case_overrides", {}):
+                card_real_dt = float(
+                    self._paper_case_overrides[key]["real_dt"].value()
+                )
+            T = self._pulse_total_time(
+                shape, freq, 0.0, ramp, plateau, rampdown
+            )
+            steps = self._real_steps_for_pulse(
+                shape,
+                freq,
+                0.0,
+                ramp,
+                plateau,
+                card_real_dt,
+                rampdown,
+            )
+            period = 2 * 3.141592653589793 / freq if freq > 0 else 0.0
+            text = (
+                f"<b>ω</b> = {freq:g} a.u. &nbsp;&nbsp; "
+                f"<b>E</b> = {E:g} a.u. &nbsp;&nbsp; "
+                f"<b>shape</b> = {shape}<br>"
+                f"period 2π/ω = {period:.3f} a.u.<br>"
+                f"ramp / plateau / rampdown = "
+                f"{ramp:g} / {plateau:g} / {rampdown:g} cycles<br>"
+                f"<b>total T</b> = {T:.2f} a.u.  "
+                f"(auto real_steps @ dt={card_real_dt:g} = <b>{steps}</b>)"
+            )
+            self._paper_case_labels[key].setText(text)
+            # If user has overridden real_steps in the card, also reflect
+            # the auto value as a placeholder for clarity.
+            if key in getattr(self, "_paper_case_overrides", {}):
+                ovr = self._paper_case_overrides[key]
+                if not ovr["real_steps_user_set"]:
+                    ovr["real_steps"].blockSignals(True)
+                    ovr["real_steps"].setValue(steps)
+                    ovr["real_steps"].blockSignals(False)
+
+    def _mark_paper_steps_overridden(self, key):
+        """User edited real_steps for this case → stop auto-refilling it."""
+        ovr = self._paper_case_overrides.get(key)
+        if ovr is not None:
+            ovr["real_steps_user_set"] = True
+
+    def _sync_load_ground(self, checked):
+        """Mirror the load_ground toggle to every tab + the Reproduce-Paper
+        page so it behaves like a single global setting."""
+        targets = []
+        for mode in ("tdse", "exact_tddft"):
+            w = self._tab_widgets.get(mode, {}).get("load_ground")
+            if w is not None:
+                targets.append(w)
+        repro = getattr(self, "_reproduce_load_ground_chk", None)
+        if repro is not None:
+            targets.append(repro)
+        for w in targets:
+            if w.isChecked() != bool(checked):
+                w.blockSignals(True)
+                w.setChecked(bool(checked))
+                w.blockSignals(False)
 
     def _apply_paper_case(self, key):
         """Write a paper-case preset into the Exact-TDDFT tab and switch."""
@@ -677,7 +956,7 @@ class MainWindow(QMainWindow):
     def _current_mode(self):
         """Return the solver mode string for the active tab.
 
-        Tab index 2 (Reproduce Paper) is a *preset* tab, not a solver mode
+        Tab index 2 (Reproduce Periodicity Paper) is a *preset* tab, not a solver mode
         — when active, run as Exact-TDDFT.
         """
         idx = self.mode_tabs.currentIndex()
@@ -731,6 +1010,21 @@ class MainWindow(QMainWindow):
 
         lay.addWidget(btn_row2)
 
+        # Per-case view selector — picks which output directory the plot
+        # tabs render from. Default "Single run" = self.work_dir; after a
+        # paper-batch run, each completed case_N appears here.
+        view_row = QWidget()
+        view_lay = QHBoxLayout(view_row)
+        view_lay.setContentsMargins(0, 0, 0, 0)
+        view_lay.addWidget(QLabel("View:"))
+        self.cmb_view_case = QComboBox()
+        self.cmb_view_case.addItem("Single run", None)
+        self.cmb_view_case.currentIndexChanged.connect(
+            self._on_view_case_changed
+        )
+        view_lay.addWidget(self.cmb_view_case, 1)
+        lay.addWidget(view_row)
+
         btn_row3 = QWidget()
         btn_layout3 = QHBoxLayout(btn_row3)
         btn_layout3.setContentsMargins(0, 0, 0, 0)
@@ -779,10 +1073,22 @@ class MainWindow(QMainWindow):
     # ------------------------------------------------------------ Actions
 
     def _log(self, msg):
-        self.log_text.append(msg)
-        self.log_text.verticalScrollBar().setValue(
-            self.log_text.verticalScrollBar().maximum()
-        )
+        """Show the latest message in the status strip.
+
+        The full historical log went away when the QTextEdit was
+        replaced by the progress bar. If the user wants persistent log
+        output, point them at the per-job stdout files in work_dir.
+        """
+        # Strip leading prefixes like "[case_1] " so the status label
+        # stays readable.
+        text = msg.rstrip()
+        if text:
+            self.status_label.setText(text[-200:])
+
+    def _set_progress(self, percent, status=None):
+        self.progress_bar.setValue(int(max(0, min(100, percent))))
+        if status:
+            self.status_label.setText(status[-200:])
 
     def _update_build_status(self):
         mode = self._current_mode() if hasattr(self, "mode_tabs") else "tdse"
@@ -815,6 +1121,7 @@ class MainWindow(QMainWindow):
         "laser_cycles",
         "laser_ramp_cycles",
         "laser_plateau_cycles",
+        "laser_rampdown_cycles",
         "laser_phi",
         "kick_strength",
         "coulomb_eps",
@@ -882,16 +1189,39 @@ class MainWindow(QMainWindow):
         self.mode_tabs.setCurrentIndex(idx)
         self._on_mode_changed()
 
+    # Fields that are *case-determined* when the Reproduce-Paper tab is
+    # active — disable them in the TDSE / Exact-TDDFT tabs so the user
+    # can't accidentally edit values that the batch will overwrite from
+    # the case cards.
+    _PAPER_DRIVEN_FIELDS = (
+        "laser_pulse_shape",
+        "laser_freq",
+        "laser_alpha",
+        "laser_ramp_cycles",
+        "laser_plateau_cycles",
+        "laser_rampdown_cycles",
+        "real_dt",
+        "real_steps",
+    )
+
     def _on_mode_changed(self, *_):
-        """Refresh build status and plot-tab visibility when mode changes."""
+        """Refresh build status, plot-tab visibility, and freeze
+        case-determined fields when the Reproduce-Paper tab is active."""
         if hasattr(self, "build_status_label"):
             self._update_build_status()
         self._apply_tab_visibility()
+        on_repro = self.mode_tabs.currentIndex() == 2
+        for mode in ("tdse", "exact_tddft"):
+            for field in self._PAPER_DRIVEN_FIELDS:
+                w = self._tab_widgets.get(mode, {}).get(field)
+                if w is not None:
+                    w.setEnabled(not on_repro)
 
     # ---- Build ----
 
     def _on_build(self):
         self.btn_build.setEnabled(False)
+        self.progress_bar.setRange(0, 0)  # indeterminate (busy) bar
         self._log("Building solver...")
         self._build_worker = BuildWorker()
         self._build_worker.output.connect(self._log)
@@ -901,6 +1231,8 @@ class MainWindow(QMainWindow):
     def _on_build_done(self, success, msg):
         self._log(msg)
         self.btn_build.setEnabled(True)
+        self.progress_bar.setRange(0, 100)
+        self._set_progress(100 if success else 0, msg)
         self._update_build_status()
         if not success:
             QMessageBox.warning(self, "Build Failed", msg)
@@ -929,6 +1261,7 @@ class MainWindow(QMainWindow):
         self._lbl_wf_snap.setText("Waiting for snapshots...")
         self.btn_run.setEnabled(False)
         self.btn_stop.setEnabled(True)
+        self.progress_bar.setRange(0, 0)  # indeterminate while running
         self._log("Starting simulation...")
 
         self._sim_worker = SimulationWorker(self.config, str(self.work_dir))
@@ -944,6 +1277,8 @@ class MainWindow(QMainWindow):
         self._log(msg)
         self.btn_run.setEnabled(True)
         self.btn_stop.setEnabled(False)
+        self.progress_bar.setRange(0, 100)
+        self._set_progress(100 if success else 0, msg)
         self._refresh_all_plots()
         if not success:
             QMessageBox.warning(self, "Simulation Error", msg)
@@ -952,6 +1287,274 @@ class MainWindow(QMainWindow):
         if self._sim_worker:
             self._sim_worker.stop()
             self._log("Stopping simulation...")
+
+    # ---- Reproduce Paper: parallel batch over the three cases ----
+
+    def _on_run_paper_batch(self):
+        """Spawn ExactTDDFT for all three paper cases concurrently.
+
+        Each case runs in latom_work/<case_name>/ with a config built
+        from the Exact-TDDFT tab's *current* widget values (grid, time,
+        physics) overridden with that case's pulse-shape / ω / E /
+        ramp / plateau. The Paper FFT Comparison tab refreshes when the
+        last case finishes.
+        """
+        if not is_solver_built(mode="exact_tddft"):
+            QMessageBox.warning(
+                self,
+                "Not Built",
+                "Build the solver first (Exact-TDDFT binary needed).",
+            )
+            return
+        if is_solver_stale(mode="exact_tddft"):
+            QMessageBox.warning(
+                self,
+                "Rebuild Required",
+                "Source files have changed since the last build. "
+                "Click 'Build Solver' before running.",
+            )
+            return
+
+        # Snapshot the current Exact-TDDFT-tab values, then overlay the
+        # paper-case fields per job.
+        widgets = self._tab_widgets["exact_tddft"]
+        base_kwargs = {"mode": "exact_tddft"}
+        for k in self._COMMON_FIELDS:
+            if k in widgets:
+                base_kwargs[k] = self._read_widget(widgets[k])
+        for k in self._TDDFT_ONLY_FIELDS:
+            if k in widgets:
+                base_kwargs[k] = self._read_widget(widgets[k])
+
+        # The 2e GS, He+ GS and seed KS orbital are field-free — same
+        # for all three cases. We want to compute them at most ONCE.
+        # Three sub-cases:
+        #   (a) load_ground=1 AND latom_work/wf_ground.dat exists →
+        #       skip the preflight entirely; use the user's existing
+        #       file as the shared source.
+        #   (b) load_ground=1 but the file is missing → error out
+        #       (the user explicitly asked to load and there's nothing
+        #       to load).
+        #   (c) load_ground=0 → run a preflight in latom_work/shared_ground/
+        #       with real_steps=0 so the binary returns straight after
+        #       imag-time; that dir becomes the shared source.
+        #
+        # Either way, in all three case dirs we copy the GS files in
+        # and pass load_ground=1 to the per-case binary so it doesn't
+        # redo imag-time per case.
+        gs_files = ("wf_ground.dat", "wf_heliumplus.dat", "ks_ground.dat")
+        load_ground = bool(base_kwargs.get("load_ground", 0))
+        single_run_dir = self.work_dir
+        shared_dir = self.work_dir / "shared_ground"
+
+        preflight = None
+        if load_ground:
+            existing = single_run_dir / "wf_ground.dat"
+            if not existing.is_file():
+                QMessageBox.warning(
+                    self,
+                    "Ground state file missing",
+                    f"'Load 2e ground state from file' is checked but "
+                    f"{existing} doesn't exist. Either uncheck the option "
+                    f"to compute, or run a single TDSE/Exact-TDDFT job "
+                    f"first to produce the GS file.",
+                )
+                return
+            shared_dir = single_run_dir
+            self._log(
+                f"Reusing existing ground state from {single_run_dir}; "
+                "no preflight needed."
+            )
+        else:
+            shared_dir.mkdir(parents=True, exist_ok=True)
+            preflight_kwargs = dict(base_kwargs)
+            preflight_kwargs["real_steps"] = 0  # imag-time only
+            preflight_cfg = SimulationConfig(**preflight_kwargs)
+            preflight = ("shared_ground", preflight_cfg, str(shared_dir))
+
+        parallel_jobs = []
+        for case_key, case in self._PAPER_CASES.items():
+            kwargs = dict(base_kwargs)
+            for field, value in case.items():
+                if field == "label":
+                    continue
+                kwargs[field] = value
+            kwargs["load_ground"] = 1  # always use the shared 2e GS
+
+            # Per-card overrides: real_dt and real_steps from the
+            # Reproduce-Paper card win over both the case defaults and
+            # the global Exact-TDDFT-tab values. real_steps is
+            # auto-computed from the pulse duration unless the user has
+            # explicitly edited it (real_steps_user_set).
+            ovr = self._paper_case_overrides.get(case_key, {})
+            if "real_dt" in ovr:
+                kwargs["real_dt"] = float(ovr["real_dt"].value())
+            auto_steps = self._real_steps_for_pulse(
+                kwargs.get("laser_pulse_shape", "sinusoidal"),
+                kwargs["laser_freq"],
+                kwargs.get("laser_cycles", 0.0),
+                kwargs.get("laser_ramp_cycles", 0.0),
+                kwargs.get("laser_plateau_cycles", 0.0),
+                kwargs["real_dt"],
+                kwargs.get("laser_rampdown_cycles", 0.0),
+            )
+            if ovr.get("real_steps_user_set"):
+                kwargs["real_steps"] = int(ovr["real_steps"].value())
+            elif auto_steps > 0:
+                kwargs["real_steps"] = auto_steps
+
+            # Auto-pick ks_every so the V_KS(x,ω) FFT can resolve up to
+            # ~harmonic 2.5 of this case's ω_L. Nyquist condition:
+            #   π / (real_dt × ks_every) ≥ ~3·ω_L  ⇒
+            #   ks_every ≤ π / (3·ω_L·real_dt)
+            wL = float(kwargs["laser_freq"])
+            dt = float(kwargs["real_dt"])
+            ks_every_auto = max(1, int(3.141592653589793 / (3.0 * wL * dt)))
+            kwargs["ks_every"] = ks_every_auto
+
+            cfg = SimulationConfig(**kwargs)
+            case_dir = self.work_dir / case_key
+            case_dir.mkdir(parents=True, exist_ok=True)
+            parallel_jobs.append((case_key, cfg, str(case_dir)))
+            ks_e = kwargs["ks_every"]
+            nyq_h = 3.141592653589793 / (kwargs["real_dt"] * ks_e * wL)
+            self._log(
+                f"[{case_key}] ω={kwargs['laser_freq']:g}, "
+                f"E={kwargs['laser_alpha']:g}, "
+                f"ramp/plateau/rampdown="
+                f"{kwargs.get('laser_ramp_cycles',0)}/"
+                f"{kwargs.get('laser_plateau_cycles',0)}/"
+                f"{kwargs.get('laser_rampdown_cycles',0)} cycles → "
+                f"T={kwargs['real_steps'] * kwargs['real_dt']:.2f} a.u., "
+                f"real_steps={kwargs['real_steps']} "
+                f"(real_dt={kwargs['real_dt']:g}, "
+                f"ks_every={ks_e}, Nyquist harmonic≈{nyq_h:.1f})"
+            )
+
+        self._batch_pending = {name for name, _, _ in parallel_jobs}
+        self._batch_dirs = {name: Path(d) for name, _, d in parallel_jobs}
+        self._batch_cfgs = {name: cfg for name, cfg, _ in parallel_jobs}
+
+        def _materialise_shared_gs():
+            import shutil
+
+            for fname in gs_files:
+                src = shared_dir / fname
+                if not src.is_file():
+                    self._log(
+                        f"[shared_ground] WARNING: {fname} not in "
+                        f"{shared_dir}; cases will recompute it themselves."
+                    )
+                    continue
+                for case_key in self._PAPER_CASES.keys():
+                    dst = self.work_dir / case_key / fname
+                    if dst.exists():
+                        dst.unlink()
+                    shutil.copy2(src, dst)
+            self._log(
+                f"Copied GS files from {shared_dir} into each case dir; "
+                "launching 3 cases in parallel…"
+            )
+
+        if preflight is None:
+            # No preflight subprocess — materialise immediately, then
+            # treat all jobs as parallel.
+            _materialise_shared_gs()
+            after_preflight = None
+        else:
+            self._log(
+                f"Preflight (shared GS) → then {len(parallel_jobs)} parallel "
+                f"cases ({', '.join(self._batch_pending)})…"
+            )
+            after_preflight = _materialise_shared_gs
+
+        self.btn_run.setEnabled(False)
+        self.btn_stop.setEnabled(True)
+        self.progress_bar.setRange(0, 100)
+        self._set_progress(0, f"Launching batch ({len(parallel_jobs)} cases)…")
+        self._batch_worker = BatchSimulationWorker(
+            parallel_jobs,
+            preflight=preflight,
+            after_preflight=after_preflight,
+        )
+        self._batch_worker.output.connect(self._log)
+        self._batch_worker.job_finished.connect(self._on_batch_job_done)
+        self._batch_worker.finished.connect(self._on_batch_done)
+        self._batch_worker.start()
+
+    def _on_batch_job_done(self, name, success, msg):
+        self._log(f"[{name}] {msg}")
+        self._batch_pending.discard(name)
+        # Progress = fraction of cases finished.
+        total = max(len(self._batch_dirs), 1)
+        done = total - len(self._batch_pending)
+        self._set_progress(
+            int(100 * done / total),
+            f"{done}/{total} cases done — {name}: {msg}",
+        )
+        # Refresh the 3-up comparison + the dropdown.
+        self._refresh_paper_fft_comparison()
+        self._populate_view_dropdown_from_batch()
+
+    def _on_batch_done(self, success, msg):
+        self._log(msg)
+        self.btn_run.setEnabled(True)
+        self.btn_stop.setEnabled(False)
+        self.progress_bar.setRange(0, 100)
+        self._set_progress(100 if success else 0, msg)
+        self._refresh_paper_fft_comparison()
+        self._populate_view_dropdown_from_batch()
+        if not success:
+            QMessageBox.warning(self, "Batch incomplete", msg)
+
+    def _refresh_paper_fft_comparison(self):
+        """Render |V_KS(x,ω)|² for each finished case into the 1×3 panel."""
+        if not hasattr(self, "_batch_dirs"):
+            return
+        c = self._canvases["Paper FFT Comparison"]
+        fig = c.figure
+        fig.clear()
+        case_keys = list(self._PAPER_CASES.keys())
+        axes = fig.subplots(1, len(case_keys))
+        if len(case_keys) == 1:
+            axes = [axes]
+        for ax, key in zip(axes, case_keys):
+            cfg = self._batch_cfgs.get(key)
+            out_dir = self._batch_dirs.get(key)
+            if cfg is None or out_dir is None or not out_dir.exists():
+                ax.set_title(self._PAPER_CASES[key]["label"])
+                ax.text(
+                    0.5,
+                    0.5,
+                    "(not run)",
+                    transform=ax.transAxes,
+                    ha="center",
+                    va="center",
+                )
+                continue
+            rp_snaps = find_realpot_snapshots(out_dir)
+            rp_data = []
+            for ts, path in rp_snaps:
+                arr = parse_orbital_1d(path, cfg.grid_nx)
+                if arr is not None:
+                    rp_data.append((ts, arr))
+            dt_snap = float(cfg.real_dt) * float(
+                cfg.ks_every if cfg.ks_every > 0 else cfg.wf_every
+            )
+            # FFT the FULL V_KS(x, t) timeline — ramp-up, plateau, and
+            # ramp-down all included.
+            plot_ks_potential_fft(
+                ax,
+                rp_data,
+                cfg.grid_dx,
+                cfg.grid_nx,
+                dt_snap,
+                laser_freq=float(cfg.laser_freq),
+                harmonic_max=2.5,
+                vmin_orders=5,
+                title=self._PAPER_CASES[key]["label"],
+            )
+        c.draw_idle()
 
     # ---- Config I/O ----
 
@@ -976,7 +1579,58 @@ class MainWindow(QMainWindow):
     # ---- Plotting ----
 
     def _get_output_dir(self):
+        if self._active_case_dir is not None:
+            return self._active_case_dir
         return self.work_dir / self.config.output_dir
+
+    def _effective_config(self):
+        """Config the plotters should use — either the live one (single
+        run) or the snapshotted config of the View-selected case."""
+        return (
+            self._active_case_cfg
+            if self._active_case_cfg is not None
+            else self.config
+        )
+
+    def _on_view_case_changed(self, *_):
+        case_key = self.cmb_view_case.currentData()
+        if case_key is None:
+            self._active_case_dir = None
+            self._active_case_cfg = None
+            self._log("View: single run")
+        else:
+            self._active_case_dir = self._batch_dirs.get(case_key)
+            self._active_case_cfg = self._batch_cfgs.get(case_key)
+            label = self._PAPER_CASES.get(case_key, {}).get("label", case_key)
+            self._log(f"View: {label} → {self._active_case_dir}")
+        # Reset live-WF and KS snapshot state so the new dir's snapshots
+        # populate from scratch.
+        self._wf_snapshots = []
+        self._wf_snap_idx = -1
+        self._ks_snapshots = []
+        self._ks_snap_idx = -1
+        self._refresh_all_plots()
+
+    def _populate_view_dropdown_from_batch(self):
+        """Add (or refresh) entries for completed batch cases."""
+        if not hasattr(self, "_batch_dirs"):
+            return
+        # Remember current selection; rebuild keeping it where possible.
+        current = self.cmb_view_case.currentData()
+        self.cmb_view_case.blockSignals(True)
+        self.cmb_view_case.clear()
+        self.cmb_view_case.addItem("Single run", None)
+        for case_key in self._PAPER_CASES.keys():
+            d = self._batch_dirs.get(case_key)
+            if d is None or not d.exists():
+                continue
+            label = self._PAPER_CASES[case_key]["label"]
+            self.cmb_view_case.addItem(label, case_key)
+        idx = self.cmb_view_case.findData(current)
+        if idx < 0:
+            idx = 0
+        self.cmb_view_case.setCurrentIndex(idx)
+        self.cmb_view_case.blockSignals(False)
 
     def _load_excited_imag_data(self, out):
         """Load imaginary time convergence data for all excited states."""
@@ -1045,8 +1699,9 @@ class MainWindow(QMainWindow):
         idx = max(0, min(idx, len(self._wf_snapshots) - 1))
         self._wf_snap_idx = idx
         ts, path = self._wf_snapshots[idx]
-        nx, ny = self.config.grid_nx, self.config.grid_ny
-        dx, dy = self.config.grid_dx, self.config.grid_dy
+        cfg = self._effective_config()
+        nx, ny = cfg.grid_nx, cfg.grid_ny
+        dx, dy = cfg.grid_dx, cfg.grid_dy
         wf = parse_wavefunction(path, nx, ny)
         c = self._canvases["Live WF"]
         plot_wavefunction_2d(c.axes, wf, dx, dy, nx, ny)
@@ -1104,7 +1759,8 @@ class MainWindow(QMainWindow):
         idx = max(0, min(idx, len(self._ks_snapshots) - 1))
         self._ks_snap_idx = idx
         ts, path = self._ks_snapshots[idx]
-        nx, dx = self.config.grid_nx, self.config.grid_dx
+        cfg = self._effective_config()
+        nx, dx = cfg.grid_nx, cfg.grid_dx
         orbital = parse_orbital_1d(path, nx)
         c = self._canvases["Live KS Orbital"]
         label = "final" if ts == -1 else f"step {ts}"
@@ -1138,15 +1794,21 @@ class MainWindow(QMainWindow):
                 self.tabs.setTabVisible(i, True)
 
     def _refresh_all_plots(self):
-        """Refresh all plots from output files."""
-        out = self._get_output_dir()
-        nx = self.config.grid_nx
-        ny = self.config.grid_ny
-        dx = self.config.grid_dx
-        dy = self.config.grid_dy
+        """Refresh all plots from output files.
 
-        imag_data = parse_imag_observables(out / self.config.obser_imag_file)
-        real_data = parse_real_observables(out / self.config.obser_file)
+        Uses _effective_config() so that the View dropdown can re-route
+        the whole plot panel to a paper-batch case's directory + config
+        without touching the user's edit state.
+        """
+        cfg = self._effective_config()
+        out = self._get_output_dir()
+        nx = cfg.grid_nx
+        ny = cfg.grid_ny
+        dx = cfg.grid_dx
+        dy = cfg.grid_dy
+
+        imag_data = parse_imag_observables(out / cfg.obser_imag_file)
+        real_data = parse_real_observables(out / cfg.obser_file)
         excited_imag = self._load_excited_imag_data(out)
 
         # Imag energy — ground state + all excited states
@@ -1201,8 +1863,8 @@ class MainWindow(QMainWindow):
         c.clear_and_draw()
 
         # Exact-TDDFT: ground-state KS orbital + live KS orbital snapshots
-        if self._current_mode() == "exact_tddft":
-            ks_gs = parse_orbital_1d(out / self.config.ks_ground_file, nx)
+        if cfg.mode == "exact_tddft":
+            ks_gs = parse_orbital_1d(out / cfg.ks_ground_file, nx)
             c = self._canvases["Ground State KS Orbital"]
             plot_ks_orbital(
                 c.axes, ks_gs, dx, nx, title="Ground-state KS orbital"
@@ -1223,20 +1885,12 @@ class MainWindow(QMainWindow):
                 arr = parse_orbital_1d(path, nx)
                 if arr is not None:
                     rp_data.append((ts, arr))
-            # dt between dumped snapshots = real_dt * wf_every (the cadence
-            # at which the C++ writes the *_real_NNNNNN files).
-            dt_snap = float(self.config.real_dt) * float(self.config.wf_every)
-            # If trapezoidal, drop the ramp-up portion before FFT so we
-            # see the periodicity (or its violation) of the plateau only.
-            shape = getattr(self.config, "laser_pulse_shape", "sinusoidal")
-            if shape == "trapezoidal":
-                ramp = float(getattr(self.config, "laser_ramp_cycles", 0.0))
-                plateau = float(
-                    getattr(self.config, "laser_plateau_cycles", 1.0)
-                )
-                skip_frac = ramp / max(ramp + plateau, 1.0)
-            else:
-                skip_frac = 0.0
+            # dt between dumped 1D KS / V_KS snapshots.
+            dt_snap = float(cfg.real_dt) * float(
+                cfg.ks_every if cfg.ks_every > 0 else cfg.wf_every
+            )
+            # FFT the FULL V_KS(x, t) timeline — ramp-up + plateau +
+            # ramp-down all included.
             c = self._canvases["KS Potential FFT"]
             plot_ks_potential_fft(
                 c.axes,
@@ -1244,12 +1898,13 @@ class MainWindow(QMainWindow):
                 dx,
                 nx,
                 dt_snap,
-                x_probe=0.0,
-                plateau_skip_frac=skip_frac,
+                laser_freq=float(cfg.laser_freq),
+                harmonic_max=2.5,
+                vmin_orders=5,
                 title=(
-                    rf"FFT of $V_{{\mathrm{{KS}}}}(0,t)$  "
-                    rf"$\omega$={self.config.laser_freq:g}, "
-                    rf"E={self.config.laser_alpha:g}"
+                    rf"$\log_{{10}}|\hat V_{{\mathrm{{KS}}}}(x,\omega)|^2$  "
+                    rf"$\omega_L$={cfg.laser_freq:g}, "
+                    rf"E={cfg.laser_alpha:g}"
                 ),
             )
             c.clear_and_draw()
@@ -1290,13 +1945,14 @@ class MainWindow(QMainWindow):
         gif_path = out / "wf_evolution.gif"
         self._log("Creating wavefunction animation...")
 
+        cfg = self._effective_config()
         try:
             n_frames = create_wf_animation(
                 out,
-                self.config.grid_nx,
-                self.config.grid_ny,
-                self.config.grid_dx,
-                self.config.grid_dy,
+                cfg.grid_nx,
+                cfg.grid_ny,
+                cfg.grid_dx,
+                cfg.grid_dy,
                 gif_path=gif_path,
                 fps=5,
             )
