@@ -25,6 +25,17 @@ static int    cfg_init_type = 3;
 static double cfg_laser_freq = 1.556;
 static double cfg_laser_alpha = 0.1;
 static double cfg_laser_cycles = 400.0;
+// Pulse shape — single source of truth. One of:
+//   "sinusoidal" (sin^2 envelope spanning laser_cycles),
+//   "trapezoidal" (linear ramp-up of laser_ramp_cycles, plateau of
+//                  laser_plateau_cycles, then zero — no ramp-down),
+//   "kick"       (constant A(t) = kick_strength; E-field = Dirac delta).
+static char   cfg_laser_pulse_shape[64] = "sinusoidal";
+static double cfg_laser_ramp_cycles = 2.0;
+static double cfg_laser_plateau_cycles = 16.0;
+// Carrier-envelope phase φ, in radians. The carrier is sin(ωt − φ).
+// Applies to sinusoidal and trapezoidal pulse shapes; no effect on kick.
+static double cfg_laser_phi = 0.0;
 static double cfg_coulomb_eps = 1.0;
 static double cfg_absorb_ampl = 50.0;
 static int    cfg_n_excited = 0;
@@ -32,8 +43,7 @@ static int    cfg_load_ground = 0;
 static int    cfg_auto_mode = 0;         // Feit-Fleck-Steiger autoionizing state extraction
 static double cfg_auto_target_energy = 0.0;  // Target energy for spectral projection
 static char   cfg_auto_input_wf[512] = "";   // Input wavefunction file for auto mode
-static int    cfg_kick_mode = 0;         // Linear response kick mode
-static double cfg_kick_strength = 0.01;  // Kick strength A_0 (velocity gauge impulse)
+static double cfg_kick_strength = 0.01;  // Constant A_0 used when pulse_shape="kick"
 static int    cfg_laser_init_state = 0;  // 0 = ground state, N = excited state N
 static int    cfg_load_excited = 0;      // 0 = always compute, 1 = load from file if available
 static int    cfg_excited_imag_mult = 1;  // multiplier for excited state imag steps; state N gets N * mult * imag_steps
@@ -74,6 +84,10 @@ static void read_config(const char* filename)
       else if (strcmp(key, "laser_freq") == 0) cfg_laser_freq = atof(value);
       else if (strcmp(key, "laser_alpha") == 0) cfg_laser_alpha = atof(value);
       else if (strcmp(key, "laser_cycles") == 0) cfg_laser_cycles = atof(value);
+      else if (strcmp(key, "laser_pulse_shape") == 0) snprintf(cfg_laser_pulse_shape, sizeof(cfg_laser_pulse_shape), "%s", value);
+      else if (strcmp(key, "laser_ramp_cycles") == 0) cfg_laser_ramp_cycles = atof(value);
+      else if (strcmp(key, "laser_plateau_cycles") == 0) cfg_laser_plateau_cycles = atof(value);
+      else if (strcmp(key, "laser_phi") == 0) cfg_laser_phi = atof(value);
       else if (strcmp(key, "coulomb_eps") == 0) cfg_coulomb_eps = atof(value);
       else if (strcmp(key, "absorb_ampl") == 0) cfg_absorb_ampl = atof(value);
       else if (strcmp(key, "n_excited") == 0)  cfg_n_excited = atoi(value);
@@ -81,7 +95,6 @@ static void read_config(const char* filename)
       else if (strcmp(key, "auto_mode") == 0) cfg_auto_mode = atoi(value);
       else if (strcmp(key, "auto_target_energy") == 0) cfg_auto_target_energy = atof(value);
       else if (strcmp(key, "auto_input_wf") == 0) snprintf(cfg_auto_input_wf, sizeof(cfg_auto_input_wf), "%s", value);
-      else if (strcmp(key, "kick_mode") == 0) cfg_kick_mode = atoi(value);
       else if (strcmp(key, "kick_strength") == 0) cfg_kick_strength = atof(value);
       else if (strcmp(key, "laser_init_state") == 0) cfg_laser_init_state = atoi(value);
       else if (strcmp(key, "load_excited") == 0) cfg_load_excited = atoi(value);
@@ -581,27 +594,31 @@ int main(int argc, char **argv)
 
 double vecpot_x(double time, int me)
 {
-  // Kick mode: constant A(t) = A_0 (Dirac delta E-field)
-  if (cfg_kick_mode)
-    {
-      return cfg_kick_strength;
-    }
+  // Kick: constant A(t) = A_0; the E-field is a Dirac delta at t=0.
+  if (strcmp(cfg_laser_pulse_shape, "kick") == 0) return cfg_kick_strength;
+  if (time <= 0.0) return 0.0;
 
-  double result=0.0;
-
-  double frequ = cfg_laser_freq;
+  double frequ    = cfg_laser_freq;
   double alphahat = cfg_laser_alpha;
-  double n = cfg_laser_cycles;
-  double ampl = alphahat*frequ;
-  double dur = n*2.0*M_PI/frequ;
-  double ww = 0.5*frequ/n;
+  double ampl     = alphahat * frequ;  // A_amp = alpha * omega
 
-  if ((time>0.0))
-    {
-      result=ampl*sin(ww*time)*sin(ww*time)*sin(frequ*time);
-    };
+  double phi = cfg_laser_phi;
 
-  return result;
+  if (strcmp(cfg_laser_pulse_shape, "trapezoidal") == 0) {
+    double T_period = 2.0 * M_PI / frequ;
+    double T_up     = cfg_laser_ramp_cycles    * T_period;
+    double T_const  = cfg_laser_plateau_cycles * T_period;
+    double env;
+    if (time < T_up)                env = time / T_up;
+    else if (time < T_up + T_const) env = 1.0;
+    else                            env = 0.0;
+    return ampl * env * sin(frequ * time - phi);
+  }
+
+  // Default "sinusoidal": sin^2 envelope over laser_cycles total cycles.
+  double n  = cfg_laser_cycles;
+  double ww = 0.5 * frequ / n;
+  return ampl * sin(ww*time) * sin(ww*time) * sin(frequ*time - phi);
 }
 
 double alpha_y(double time, int me)

@@ -41,6 +41,16 @@ class SimulationConfig:
     laser_freq: float = 1.556
     laser_alpha: float = 0.1
     laser_cycles: float = 40.0
+    # Pulse shape — single source of truth for what A(t) looks like.
+    # One of "sinusoidal" (sin^2 envelope spanning laser_cycles),
+    # "trapezoidal" (linear ramp + plateau, no ramp-down), or
+    # "kick" (constant A(t)=kick_strength, Dirac-delta E-field).
+    laser_pulse_shape: str = "sinusoidal"
+    laser_ramp_cycles: float = 2.0
+    laser_plateau_cycles: float = 16.0
+    # Carrier-envelope phase φ (radians). Carrier is sin(ωt − φ).
+    # Applies to sinusoidal and trapezoidal; ignored for kick.
+    laser_phi: float = 0.0
 
     # Excited states
     n_excited: int = 0
@@ -57,8 +67,7 @@ class SimulationConfig:
     auto_target_energy: float = 0.0
     auto_input_wf: str = ""
 
-    # Kick mode (linear response spectrum)
-    kick_mode: int = 0
+    # Kick strength A_0 (used only when laser_pulse_shape == "kick").
     kick_strength: float = 0.01
 
     # Real-time initial state: 0 = ground state, N = excited state N

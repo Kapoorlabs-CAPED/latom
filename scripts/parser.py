@@ -167,6 +167,11 @@ def find_ks_snapshots(output_dir):
     return _find_snapshots(output_dir, "ks_real_")
 
 
+def find_realpot_snapshots(output_dir):
+    """Effective-KS-potential snapshots written by the ExactTDDFT binary."""
+    return _find_snapshots(output_dir, "realpot_real_")
+
+
 def find_wf_snapshots(output_dir):
     """Find all real-time wavefunction snapshot files in output directory.
 

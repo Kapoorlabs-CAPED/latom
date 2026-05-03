@@ -11,6 +11,7 @@ if _scripts_dir not in sys.path:
 
 from parser import (  # noqa: E402
     find_ks_snapshots,
+    find_realpot_snapshots,
     find_wf_snapshots,
     parse_imag_observables,
     parse_orbital_1d,
@@ -28,6 +29,7 @@ from plotting import (  # noqa: E402
     plot_imag_convergence,
     plot_ionization,
     plot_ks_orbital,
+    plot_ks_potential_fft,
     plot_spectrum,
     plot_vector_potential,
     plot_wavefunction_2d,
@@ -36,6 +38,7 @@ from PyQt5.QtCore import Qt, QTimer  # noqa: E402
 from PyQt5.QtWidgets import (  # noqa: E402
     QApplication,
     QCheckBox,
+    QComboBox,
     QDoubleSpinBox,
     QFileDialog,
     QGroupBox,
@@ -135,12 +138,17 @@ class MainWindow(QMainWindow):
             "1D Density",
             "Ground State KS Orbital",
             "Live KS Orbital",
+            "KS Potential FFT",
             "Live WF",
         ]
         # Tabs that are only meaningful in one mode. The others are shown
         # in both. _apply_tab_visibility() toggles these on mode change.
         self._tdse_only_tabs = ("1D Density",)
-        self._tddft_only_tabs = ("Ground State KS Orbital", "Live KS Orbital")
+        self._tddft_only_tabs = (
+            "Ground State KS Orbital",
+            "Live KS Orbital",
+            "KS Potential FFT",
+        )
         for name in tab_names:
             if name == "Live WF":
                 container = self._make_live_tab(
@@ -356,6 +364,26 @@ class MainWindow(QMainWindow):
         # ----- Laser -----
         grp = QGroupBox("Laser (Velocity Gauge)")
         g = QVBoxLayout(grp)
+
+        # Pulse shape selector — single source of truth for what A(t) is.
+        # All three shapes share the same Frequency / Alpha controls; the
+        # extra inputs that follow apply only to specific shapes (the C++
+        # ignores them otherwise).
+        shape_row = QWidget()
+        shape_lay = QHBoxLayout(shape_row)
+        shape_lay.setContentsMargins(0, 0, 0, 0)
+        shape_lay.addWidget(QLabel("Pulse shape"))
+        cmb = QComboBox()
+        cmb.addItem("Sinusoidal (sin² × sin)", "sinusoidal")
+        cmb.addItem("Trapezoidal (ramp + plateau)", "trapezoidal")
+        cmb.addItem("Kick (constant A₀)", "kick")
+        idx = cmb.findData(getattr(cfg, "laser_pulse_shape", "sinusoidal"))
+        if idx >= 0:
+            cmb.setCurrentIndex(idx)
+        widgets["laser_pulse_shape"] = cmb
+        shape_lay.addWidget(cmb, 1)
+        g.addWidget(shape_row)
+
         self._add_spin(
             g,
             widgets,
@@ -370,22 +398,73 @@ class MainWindow(QMainWindow):
             g,
             widgets,
             "laser_alpha",
-            "Alpha",
+            "Alpha (E)",
             0.001,
             100.0,
             cfg.laser_alpha,
             True,
+            tooltip="Electric-field amplitude. A_max = alpha × ω.",
         )
         self._add_spin(
             g,
             widgets,
             "laser_cycles",
-            "Cycles",
+            "Cycles (sinusoidal)",
             1.0,
             10000.0,
             cfg.laser_cycles,
             True,
             decimals=1,
+            tooltip="Sinusoidal sin² envelope only.",
+        )
+        self._add_spin(
+            g,
+            widgets,
+            "laser_ramp_cycles",
+            "Ramp-up cycles",
+            0.0,
+            1000.0,
+            getattr(cfg, "laser_ramp_cycles", 2.0),
+            True,
+            decimals=2,
+            tooltip="Trapezoidal only.",
+        )
+        self._add_spin(
+            g,
+            widgets,
+            "laser_plateau_cycles",
+            "Plateau cycles",
+            0.0,
+            10000.0,
+            getattr(cfg, "laser_plateau_cycles", 16.0),
+            True,
+            decimals=2,
+            tooltip="Trapezoidal only.",
+        )
+        self._add_spin(
+            g,
+            widgets,
+            "kick_strength",
+            "Kick strength A₀",
+            0.0,
+            1.0,
+            cfg.kick_strength,
+            is_float=True,
+            decimals=4,
+            tooltip="Kick only — constant value of A(t).",
+        )
+        self._add_spin(
+            g,
+            widgets,
+            "laser_phi",
+            "Carrier phase φ (rad)",
+            -100.0,
+            100.0,
+            getattr(cfg, "laser_phi", 0.0),
+            is_float=True,
+            decimals=4,
+            tooltip="Carrier-envelope phase. Carrier is sin(ωt − φ). "
+            "Ignored for kick.",
         )
         outer.addWidget(grp)
 
@@ -494,28 +573,8 @@ class MainWindow(QMainWindow):
         )
         outer.addWidget(grp)
 
-        # ----- Kick (linear response) -----
-        grp = QGroupBox("Kick (linear response)")
-        g = QVBoxLayout(grp)
-        self._add_check(
-            g,
-            widgets,
-            "kick_mode",
-            "Enable kick mode",
-            cfg.kick_mode,
-        )
-        self._add_spin(
-            g,
-            widgets,
-            "kick_strength",
-            "Kick strength A_0",
-            0.0,
-            1.0,
-            cfg.kick_strength,
-            is_float=True,
-            decimals=4,
-        )
-        outer.addWidget(grp)
+        # Kick is now selected via the Pulse-shape combo (kick_strength
+        # spin lives in the Laser group), so no separate "Kick" panel.
 
         # The He+ and KS ground orbitals are derived artefacts: the
         # Exact-TDDFT binary auto-loads them from disk if cached, else
@@ -524,8 +583,43 @@ class MainWindow(QMainWindow):
         outer.addStretch()
         return tab
 
+    # Paper-reproduction cases. ω = laser_freq, E = laser_alpha (latom's
+    # convention sets A_amp = alpha · omega, so passing E in laser_alpha
+    # gives the paper's stated A_max = ω·E directly).
+    _PAPER_CASES = {
+        "case_1": dict(
+            label="Case 1: low-ω (ω=0.056, E=0.063)",
+            laser_pulse_shape="trapezoidal",
+            laser_freq=0.056,
+            laser_alpha=0.063,
+            laser_ramp_cycles=2.0,
+            laser_plateau_cycles=16.0,
+        ),
+        "case_2": dict(
+            label="Case 2: high-ω (ω=2.6, E=0.34)",
+            laser_pulse_shape="trapezoidal",
+            laser_freq=2.6,
+            laser_alpha=0.34,
+            laser_ramp_cycles=4.0,
+            laser_plateau_cycles=172.0,
+        ),
+        "case_3": dict(
+            label="Case 3: resonant (ω=0.533, E=0.016)",
+            laser_pulse_shape="trapezoidal",
+            laser_freq=0.533,
+            laser_alpha=0.016,
+            laser_ramp_cycles=2.0,
+            laser_plateau_cycles=148.0,
+        ),
+    }
+
     def _make_mode_tabs_group(self):
-        """Top-level tab widget: each tab is a self-contained mode."""
+        """Top-level tab widget: each tab is a self-contained mode.
+
+        Tabs 0/1 are the actual solver modes. Tab 2 (Reproduce Paper)
+        contains preset buttons that configure tab 1 (Exact-TDDFT) with
+        paper parameters and switch to it.
+        """
         self._tab_widgets = {"tdse": {}, "exact_tddft": {}}
         grp = QGroupBox("Solver Mode")
         lay = QVBoxLayout(grp)
@@ -534,15 +628,60 @@ class MainWindow(QMainWindow):
         self.mode_tabs.addTab(
             self._build_param_tab("exact_tddft"), "Exact-TDDFT"
         )
+        self.mode_tabs.addTab(self._build_reproduce_tab(), "Reproduce Paper")
         idx = 1 if getattr(self.config, "mode", "tdse") == "exact_tddft" else 0
         self.mode_tabs.setCurrentIndex(idx)
         self.mode_tabs.currentChanged.connect(self._on_mode_changed)
         lay.addWidget(self.mode_tabs)
         return grp
 
+    def _build_reproduce_tab(self):
+        """Tab with one button per paper case.
+
+        Clicking a button writes the case's parameters into the
+        Exact-TDDFT tab's widgets and switches to that tab. The user then
+        clicks Run as usual — no separate runner.
+        """
+        tab = QWidget()
+        outer = QVBoxLayout(tab)
+        outer.setContentsMargins(8, 8, 8, 8)
+        outer.addWidget(
+            QLabel(
+                "One-click presets for the paper's three KS-potential cases.\n"
+                "Each button loads ω, E, ramp-up and plateau into the\n"
+                "Exact-TDDFT tab (trapezoidal envelope), then switches to it."
+            )
+        )
+        for key, case in self._PAPER_CASES.items():
+            btn = QPushButton(case["label"])
+            btn.clicked.connect(
+                lambda _checked=False, k=key: self._apply_paper_case(k)
+            )
+            outer.addWidget(btn)
+        outer.addStretch()
+        return tab
+
+    def _apply_paper_case(self, key):
+        """Write a paper-case preset into the Exact-TDDFT tab and switch."""
+        case = self._PAPER_CASES[key]
+        widgets = self._tab_widgets["exact_tddft"]
+        for field, value in case.items():
+            if field == "label" or field not in widgets:
+                continue
+            self._write_widget(widgets[field], value)
+        self.mode_tabs.setCurrentIndex(1)
+        self._log(
+            f"Loaded paper preset: {case['label']}. Click Run to launch."
+        )
+
     def _current_mode(self):
-        """Return the solver mode string for the active tab."""
-        return "exact_tddft" if self.mode_tabs.currentIndex() == 1 else "tdse"
+        """Return the solver mode string for the active tab.
+
+        Tab index 2 (Reproduce Paper) is a *preset* tab, not a solver mode
+        — when active, run as Exact-TDDFT.
+        """
+        idx = self.mode_tabs.currentIndex()
+        return "exact_tddft" if idx >= 1 else "tdse"
 
     def _active_widgets(self):
         """Widget dict for the currently active mode tab."""
@@ -670,9 +809,14 @@ class MainWindow(QMainWindow):
         "imag_steps",
         "real_dt",
         "real_steps",
+        "laser_pulse_shape",
         "laser_freq",
         "laser_alpha",
         "laser_cycles",
+        "laser_ramp_cycles",
+        "laser_plateau_cycles",
+        "laser_phi",
+        "kick_strength",
         "coulomb_eps",
         "absorb_ampl",
         "ionization_box",
@@ -683,25 +827,29 @@ class MainWindow(QMainWindow):
         "laser_init_state",
         "auto_mode",
         "auto_target_energy",
-        "kick_mode",
-        "kick_strength",
     )
     _TDDFT_ONLY_FIELDS = ()
 
     @staticmethod
     def _read_widget(w):
-        from PyQt5.QtWidgets import QCheckBox
+        from PyQt5.QtWidgets import QCheckBox, QComboBox
 
         if isinstance(w, QCheckBox):
             return 1 if w.isChecked() else 0
+        if isinstance(w, QComboBox):
+            return w.currentData()
         return w.value()
 
     @staticmethod
     def _write_widget(w, value):
-        from PyQt5.QtWidgets import QCheckBox
+        from PyQt5.QtWidgets import QCheckBox, QComboBox
 
         if isinstance(w, QCheckBox):
             w.setChecked(bool(value))
+        elif isinstance(w, QComboBox):
+            idx = w.findData(value)
+            if idx >= 0:
+                w.setCurrentIndex(idx)
         else:
             w.setValue(value)
 
@@ -711,7 +859,8 @@ class MainWindow(QMainWindow):
         mode = self._current_mode()
         kwargs = {"mode": mode}
         for k in self._COMMON_FIELDS:
-            kwargs[k] = self._read_widget(widgets[k])
+            if k in widgets:
+                kwargs[k] = self._read_widget(widgets[k])
         for k in self._TDDFT_ONLY_FIELDS:
             if k in widgets:
                 kwargs[k] = self._read_widget(widgets[k])
@@ -1066,6 +1215,44 @@ class MainWindow(QMainWindow):
                     self._ks_snapshots = ks_snaps
                     self._ks_snap_idx = len(ks_snaps) - 1
                 self._show_ks_snapshot(self._ks_snap_idx)
+
+            # KS potential FFT (Reproduce-Paper main panel).
+            rp_snaps = find_realpot_snapshots(out)
+            rp_data = []
+            for ts, path in rp_snaps:
+                arr = parse_orbital_1d(path, nx)
+                if arr is not None:
+                    rp_data.append((ts, arr))
+            # dt between dumped snapshots = real_dt * wf_every (the cadence
+            # at which the C++ writes the *_real_NNNNNN files).
+            dt_snap = float(self.config.real_dt) * float(self.config.wf_every)
+            # If trapezoidal, drop the ramp-up portion before FFT so we
+            # see the periodicity (or its violation) of the plateau only.
+            shape = getattr(self.config, "laser_pulse_shape", "sinusoidal")
+            if shape == "trapezoidal":
+                ramp = float(getattr(self.config, "laser_ramp_cycles", 0.0))
+                plateau = float(
+                    getattr(self.config, "laser_plateau_cycles", 1.0)
+                )
+                skip_frac = ramp / max(ramp + plateau, 1.0)
+            else:
+                skip_frac = 0.0
+            c = self._canvases["KS Potential FFT"]
+            plot_ks_potential_fft(
+                c.axes,
+                rp_data,
+                dx,
+                nx,
+                dt_snap,
+                x_probe=0.0,
+                plateau_skip_frac=skip_frac,
+                title=(
+                    rf"FFT of $V_{{\mathrm{{KS}}}}(0,t)$  "
+                    rf"$\omega$={self.config.laser_freq:g}, "
+                    rf"E={self.config.laser_alpha:g}"
+                ),
+            )
+            c.clear_and_draw()
 
         # Excited state wavefunctions — all in a single tab with grid layout
         excited_wfs = []

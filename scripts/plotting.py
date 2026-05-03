@@ -164,6 +164,70 @@ def plot_wavefunction_2d(ax, wf, dx, dy, nx, ny, vmin_orders=7):
     ax._latom_cbar = cbar
 
 
+def plot_ks_potential_fft(
+    ax,
+    snapshots,
+    dx,
+    nx,
+    dt_snapshot,
+    x_probe=0.0,
+    plateau_skip_frac=0.0,
+    title=None,
+):
+    """Plot the temporal FFT of V_KS(x_probe, t) over snapshot times.
+
+    Used by the Reproduce-Paper tab to visualise periodicity violation in
+    the exact KS potential.
+
+    Args:
+        ax: Matplotlib Axes.
+        snapshots: list of (t_index, complex_array_len_nx) tuples (sorted).
+        dx: grid spacing in x.
+        nx: number of x grid points.
+        dt_snapshot: time step *between* snapshots (== real_dt * wf_every).
+        x_probe: x position (a.u.) at which to sample V_KS.
+        plateau_skip_frac: drop this fraction of leading snapshots (the
+            ramp-up region) before FFT.
+        title: optional axes title.
+    """
+    ax.clear()
+    if not snapshots:
+        ax.set_title("No KS potential snapshots yet")
+        return
+    # Sort, drop the "final" sentinel (-1) since it duplicates the last frame.
+    snaps = [(t, p) for t, p in snapshots if t != -1]
+    snaps.sort(key=lambda tp: tp[0])
+    if len(snaps) < 8:
+        ax.set_title(f"Need ≥8 snapshots for FFT (have {len(snaps)})")
+        return
+
+    # Sample V_KS at x_probe across all snapshots.
+    coords = (np.arange(nx) - nx / 2 + 0.5) * dx
+    ix = int(np.argmin(np.abs(coords - x_probe)))
+    series = np.array([arr[ix].real for _, arr in snaps], dtype=float)
+
+    # Skip ramp-up so the FFT sees only the plateau region.
+    skip = int(round(plateau_skip_frac * len(series)))
+    if skip < len(series) - 8:
+        series = series[skip:]
+
+    series = series - series.mean()  # remove DC
+    n = len(series)
+    # Hann window suppresses spectral leakage given the finite plateau.
+    window = 0.5 * (1.0 - np.cos(2.0 * np.pi * np.arange(n) / max(n - 1, 1)))
+    spec = np.fft.rfft(series * window)
+    freqs = (
+        np.fft.rfftfreq(n, d=dt_snapshot) * 2.0 * np.pi
+    )  # angular freq (a.u.)
+    power = (np.abs(spec) ** 2) / max(np.max(np.abs(spec) ** 2), 1e-30)
+
+    ax.semilogy(freqs, power, "b-", linewidth=0.8)
+    ax.set_xlabel(r"$\omega$ (a.u.)")
+    ax.set_ylabel(r"$|\hat V_{\mathrm{KS}}(\omega)|^2$ (norm.)")
+    ax.set_title(title or rf"FFT of $V_{{\mathrm{{KS}}}}(x={x_probe:g}, t)$")
+    ax.grid(True, which="both", alpha=0.3)
+
+
 def plot_ks_orbital(ax, orbital, dx, nx, title=None):
     """Plot a 1D Kohn-Sham orbital: |phi|^2 plus real/imag parts.
 
