@@ -69,9 +69,9 @@ class SimulationConfig:
     # the Kohn-Sham orbital and effective potential each step.
     mode: str = "tdse"
 
-    # Exact-TDDFT caching / inputs (ignored when mode == "tdse")
-    load_heplus: int = 0
-    load_ks_ground: int = 0
+    # Exact-TDDFT inputs (ignored when mode == "tdse"). The He+ orbital
+    # and KS ground orbital are auto-loaded if their files exist on disk,
+    # otherwise they are recomputed — no separate toggles needed.
     heplus_imag_steps: int = 0  # 0 -> reuse imag_steps
     heplus_file: str = "wf_heliumplus.dat"
     ks_ground_file: str = "ks_ground.dat"

@@ -286,7 +286,6 @@ def plot_ionization(ax, data):
     ax.set_xlabel("Time (a.u.)")
     ax.set_ylabel("Population")
     ax.set_title("Ground State Population")
-    ax.set_ylim(-0.05, 1.05)
     ax.legend(fontsize=8)
     ax.grid(True, alpha=0.3)
 

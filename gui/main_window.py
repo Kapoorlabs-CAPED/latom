@@ -517,27 +517,9 @@ class MainWindow(QMainWindow):
         )
         outer.addWidget(grp)
 
-        # ----- Exact-TDDFT-only caching -----
-        if mode == "exact_tddft":
-            grp = QGroupBox("Kohn-Sham caching")
-            g = QVBoxLayout(grp)
-            self._add_check(
-                g,
-                widgets,
-                "load_heplus",
-                "Load He+ ground state from file",
-                getattr(cfg, "load_heplus", 0),
-                "Load wf_heliumplus.dat if present, else compute via 1D imag-time.",
-            )
-            self._add_check(
-                g,
-                widgets,
-                "load_ks_ground",
-                "Load KS ground orbital from file",
-                getattr(cfg, "load_ks_ground", 0),
-                "Load ks_ground.dat if present, else build from 2e GS density.",
-            )
-            outer.addWidget(grp)
+        # The He+ and KS ground orbitals are derived artefacts: the
+        # Exact-TDDFT binary auto-loads them from disk if cached, else
+        # recomputes — no user toggle needed.
 
         outer.addStretch()
         return tab
@@ -704,7 +686,7 @@ class MainWindow(QMainWindow):
         "kick_mode",
         "kick_strength",
     )
-    _TDDFT_ONLY_FIELDS = ("load_heplus", "load_ks_ground")
+    _TDDFT_ONLY_FIELDS = ()
 
     @staticmethod
     def _read_widget(w):

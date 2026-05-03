@@ -36,11 +36,16 @@ static double cfg_laser_cycles = 400.0;
 static double cfg_coulomb_eps = 1.0;
 static double cfg_absorb_ampl = 50.0;
 
-// Caching: TDSE 2e ground state, He+ 1e ground state, initial KS orbital
+// Caching: only the 2e ground state has a user toggle; the He+ orbital
+// and the initial KS orbital are derived artefacts and are auto-loaded
+// from disk if their files exist, else recomputed.
 static int    cfg_load_ground = 0;
-static int    cfg_load_heplus = 0;
-static int    cfg_load_ks_ground = 0;
 static long   cfg_heplus_imag_steps = 0;  // 0 -> reuse cfg_no_of_imag_timesteps
+
+// Kick mode: replace the laser pulse with a constant A_0 (linear-response
+// impulse in velocity gauge). Same semantics as TDSE.cc.
+static int    cfg_kick_mode = 0;
+static double cfg_kick_strength = 0.01;
 
 static char   cfg_output_dir[512]   = "res";
 static char   cfg_obser_file[512]   = "obser_laser.dat";
@@ -82,9 +87,9 @@ static void read_config(const char* filename)
       else if (strcmp(key, "coulomb_eps") == 0)     cfg_coulomb_eps = atof(value);
       else if (strcmp(key, "absorb_ampl") == 0)     cfg_absorb_ampl = atof(value);
       else if (strcmp(key, "load_ground") == 0)     cfg_load_ground = atoi(value);
-      else if (strcmp(key, "load_heplus") == 0)     cfg_load_heplus = atoi(value);
-      else if (strcmp(key, "load_ks_ground") == 0)  cfg_load_ks_ground = atoi(value);
       else if (strcmp(key, "heplus_imag_steps") == 0) cfg_heplus_imag_steps = atol(value);
+      else if (strcmp(key, "kick_mode") == 0)       cfg_kick_mode = atoi(value);
+      else if (strcmp(key, "kick_strength") == 0)   cfg_kick_strength = atof(value);
       else if (strcmp(key, "output_dir") == 0)      snprintf(cfg_output_dir, sizeof(cfg_output_dir), "%s", value);
       else if (strcmp(key, "obser_file") == 0)      snprintf(cfg_obser_file, sizeof(cfg_obser_file), "%s", value);
       else if (strcmp(key, "obser_imag_file") == 0) snprintf(cfg_obser_imag_file, sizeof(cfg_obser_imag_file), "%s", value);
@@ -241,8 +246,8 @@ int main(int argc, char **argv)
   }
   fclose(file_obser_imag);
 
-  // ============= He+ 1e ground state: load or imag-time =============
-  if (cfg_load_heplus && file_exists(p_heplus)) {
+  // ============= He+ 1e ground state: auto-load if cached, else imag-time =============
+  if (file_exists(p_heplus)) {
     cout << "Loading He+ ground state from " << p_heplus << endl;
     FILE* f = fopen(p_heplus, "r");
     wfheliumplus.init(gone, 99, 0.1, 0.0, 0.0, f, 0);
@@ -271,8 +276,8 @@ int main(int argc, char **argv)
     cout << "He+ ground state written to " << p_heplus << endl;
   }
 
-  // ============= Initial KS orbital: load or build from GS =============
-  if (cfg_load_ks_ground && file_exists(p_ks_ground)) {
+  // ============= Initial KS orbital: auto-load if cached, else build from 2e GS =============
+  if (file_exists(p_ks_ground)) {
     cout << "Loading KS ground orbital from " << p_ks_ground << endl;
     FILE* f = fopen(p_ks_ground, "r");
     kohnshamorbital.init(gone, 99, 0.1, 0.0, 0.0, f, 0);
@@ -328,12 +333,19 @@ int main(int argc, char **argv)
       complenerg = wf.energy(0.0, g, hamilton, me, masses,
                              staticpot_x, staticpot_y, staticpot_xy, charge);
       complex<double> gspop = wf * wfini * g.delt_x() * g.delt_y();
-      fprintf(file_obser, " %.14le %.14le %.14le %.14le %.14le %.14le %.14le %.14le %.14le\n",
+      // Columns 1..8 must match TDSE.cc exactly so the GUI's parser
+      // (REAL_COLUMNS in scripts/parser.py) lines up:
+      //   time, E_re, E_im, norm, <x>, <y>, vecpot_x, |<gs|psi>|^2
+      // KS-specific extras go AFTER that (column 9+); the parser
+      // truncates trailing columns it doesn't know about.
+      fprintf(file_obser,
+              " %.14le %.14le %.14le %.14le %.14le %.14le %.14le %.14le %.14le\n",
               time + real(timestep), real(complenerg), imag(complenerg),
-              wf.norm(g), kohnshamorbital.norm(gone),
+              wf.norm(g),
               wf.expect_x(g), wf.expect_y(g),
               hamilton.vecpot_x(time, me),
-              real(conj(gspop) * gspop));
+              real(conj(gspop) * gspop),
+              kohnshamorbital.norm(gone));
       fflush(file_obser);
       cout << "Real: " << ts << "  <x>=" << wf.expect_x(g)
            << "  KS norm=" << kohnshamorbital.norm(gone) << endl;
@@ -381,6 +393,9 @@ int main(int argc, char **argv)
 
 double vecpot_x(double time, int me)
 {
+  // Kick mode: A(t) = A_0 (constant) -> E-field is a Dirac delta at t=0.
+  if (cfg_kick_mode) return cfg_kick_strength;
+
   double frequ = cfg_laser_freq;
   double alphahat = cfg_laser_alpha;
   double n = cfg_laser_cycles;
