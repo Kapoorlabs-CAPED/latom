@@ -84,6 +84,14 @@ class SimulationConfig:
     # Kick strength A_0 (used only when laser_pulse_shape == "kick").
     kick_strength: float = 0.01
 
+    # Regridding cached ground states from a smaller grid: when these
+    # values are non-zero AND differ from the current grid, the C++
+    # binary reads the file at the smaller grid and regrids onto the
+    # current (presumably larger) grid. Used when grid_nx/ny were
+    # increased between runs.
+    regrid_from_nx_2e: int = 0  # square-grid 2e wf_ground.dat
+    regrid_from_nx_1e: int = 0  # 1D He+/KS ground orbitals
+
     # Real-time initial state: 0 = ground state, N = excited state N
     laser_init_state: int = 0
 

@@ -41,6 +41,7 @@ static double cfg_coulomb_eps = 1.0;
 static double cfg_absorb_ampl = 50.0;
 static int    cfg_n_excited = 0;
 static int    cfg_load_ground = 0;
+static long   cfg_regrid_from_nx_2e = 0;  // square small grid for the 2D wf_ground
 static int    cfg_auto_mode = 0;         // Feit-Fleck-Steiger autoionizing state extraction
 static double cfg_auto_target_energy = 0.0;  // Target energy for spectral projection
 static char   cfg_auto_input_wf[512] = "";   // Input wavefunction file for auto mode
@@ -94,6 +95,7 @@ static void read_config(const char* filename)
       else if (strcmp(key, "absorb_ampl") == 0) cfg_absorb_ampl = atof(value);
       else if (strcmp(key, "n_excited") == 0)  cfg_n_excited = atoi(value);
       else if (strcmp(key, "load_ground") == 0) cfg_load_ground = atoi(value);
+      else if (strcmp(key, "regrid_from_nx_2e") == 0) cfg_regrid_from_nx_2e = atol(value);
       else if (strcmp(key, "auto_mode") == 0) cfg_auto_mode = atoi(value);
       else if (strcmp(key, "auto_target_energy") == 0) cfg_auto_target_energy = atof(value);
       else if (strcmp(key, "auto_input_wf") == 0) snprintf(cfg_auto_input_wf, sizeof(cfg_auto_input_wf), "%s", value);
@@ -225,11 +227,27 @@ int main(int argc, char **argv)
 
   if (cfg_load_ground)
     {
-      // Load ground state from file instead of computing
       cout << "Loading ground state from " << string_wf_ground << endl;
       FILE* f_gs = fopen(string_wf_ground, "r");
       if (f_gs) {
-        wf.init(g, 99, 0.1, 0.0, 0.0, f_gs, 0);
+        if (cfg_regrid_from_nx_2e > 0 && cfg_regrid_from_nx_2e != ngpsx) {
+          // File was computed on a smaller (square) grid. Read it onto
+          // a temporary small grid, then regrid onto the current one.
+          long sn = cfg_regrid_from_nx_2e;
+          cout << "  cached grid is " << sn << "x" << sn
+               << "; regridding onto " << ngpsx << "x" << ngpsy << endl;
+          grid g_small;
+          g_small.set_dim(g.dimens());
+          g_small.set_ngps(sn, sn, ngpsz);
+          g_small.set_delt(deltx, delty, deltz);
+          g_small.set_offs(sn / 2, sn / 2, 0);
+          wavefunction wfread(sn * sn);
+          wfread.init(g_small, 99, 0.1, 0.0, 0.0, f_gs, 0);
+          wf.nullify();
+          wf.regrid(g, g_small, wfread);
+        } else {
+          wf.init(g, 99, 0.1, 0.0, 0.0, f_gs, 0);
+        }
         fclose(f_gs);
         wf *= 1.0 / sqrt(wf.norm(g));
         complenerg = wf.energy(0.0, g, hamilton, me, masses,

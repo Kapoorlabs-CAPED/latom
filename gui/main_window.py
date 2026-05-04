@@ -143,7 +143,10 @@ class MainWindow(QMainWindow):
         prog_lay.addWidget(self.progress_bar)
         left_layout.addWidget(prog_row)
 
-        left.setMaximumWidth(360)
+        # Don't *cap* the parameter panel; just give it a sensible
+        # minimum so it can't collapse below readability. The splitter
+        # handle below is grippable so the user can resize freely.
+        left.setMinimumWidth(280)
         splitter.addWidget(left)
 
         # Right panel: tabbed plots
@@ -207,6 +210,12 @@ class MainWindow(QMainWindow):
 
         splitter.addWidget(self.tabs)
         splitter.setSizes([340, 860])
+        # Make the splitter handle obvious + grippable, and allow either
+        # pane to take the full window when the other is collapsed.
+        splitter.setHandleWidth(6)
+        splitter.setChildrenCollapsible(False)
+        splitter.setStretchFactor(0, 0)  # left: don't stretch on resize
+        splitter.setStretchFactor(1, 1)  # right: take all extra space
 
     # ---- Parameter groups ----
 
@@ -486,18 +495,6 @@ class MainWindow(QMainWindow):
         self._add_spin(
             g,
             widgets,
-            "kick_strength",
-            "Kick strength A₀",
-            0.0,
-            1.0,
-            cfg.kick_strength,
-            is_float=True,
-            decimals=4,
-            tooltip="Kick only — constant value of A(t).",
-        )
-        self._add_spin(
-            g,
-            widgets,
             "laser_phi",
             "Carrier phase φ (rad)",
             -100.0,
@@ -596,31 +593,10 @@ class MainWindow(QMainWindow):
         )
         outer.addWidget(grp)
 
-        # ----- Autoionizing -----
-        grp = QGroupBox("Autoionizing (Feit-Fleck-Steiger)")
-        g = QVBoxLayout(grp)
-        self._add_check(
-            g,
-            widgets,
-            "auto_mode",
-            "Enable autoionizing mode",
-            cfg.auto_mode,
-        )
-        self._add_spin(
-            g,
-            widgets,
-            "auto_target_energy",
-            "Target energy (a.u.)",
-            -10.0,
-            10.0,
-            cfg.auto_target_energy,
-            is_float=True,
-            decimals=4,
-        )
-        outer.addWidget(grp)
-
-        # Kick is now selected via the Pulse-shape combo (kick_strength
-        # spin lives in the Laser group), so no separate "Kick" panel.
+        # Autoionizing and kick workflows live in their own dedicated
+        # tabs (Autoionization Computer, Kick / Linear Response) — the
+        # TDSE and Exact-TDDFT tabs are kept clean for the canonical
+        # "propagate under a laser pulse" workflow.
 
         # The He+ and KS ground orbitals are derived artefacts: the
         # Exact-TDDFT binary auto-loads them from disk if cached, else
@@ -693,15 +669,30 @@ class MainWindow(QMainWindow):
         ),
     }
 
-    def _make_mode_tabs_group(self):
-        """Top-level tab widget: each tab is a self-contained mode.
+    # Top-level tab order. Each entry is the dict key under
+    # ``self._tab_widgets`` and decides which workflow runs when the
+    # user hits Run.
+    _TAB_ORDER = (
+        ("tdse", "TDSE"),
+        ("exact_tddft", "Exact-TDDFT"),
+        ("reproduce", "Reproduce Periodicity Paper"),
+        ("autoionization", "Autoionization Computer"),
+        ("kick", "Kick / Linear Response"),
+    )
 
-        Tabs 0/1 are the actual solver modes. Tab 2 (Reproduce Periodicity Paper)
-        contains preset buttons that configure tab 1 (Exact-TDDFT) with
-        paper parameters and switch to it.
+    def _make_mode_tabs_group(self):
+        """Top-level tab widget: each tab is a self-contained workflow.
+
+        - TDSE / Exact-TDDFT: standard laser propagation, picks the binary.
+        - Reproduce Periodicity Paper: preset buttons + parallel batch.
+        - Autoionization Computer: Feit-Fleck-Steiger spectral projection.
+        - Kick / Linear Response: kick (constant A₀) for spectroscopy.
+
+        Each tab has only the controls it needs; auto / kick options no
+        longer appear in the basic TDSE / Exact-TDDFT tabs.
         """
-        self._tab_widgets = {"tdse": {}, "exact_tddft": {}}
-        grp = QGroupBox("Solver Mode")
+        self._tab_widgets = {key: {} for key, _ in self._TAB_ORDER}
+        grp = QGroupBox("Workflow")
         lay = QVBoxLayout(grp)
         self.mode_tabs = QTabWidget()
         self.mode_tabs.addTab(self._build_param_tab("tdse"), "TDSE")
@@ -711,14 +702,46 @@ class MainWindow(QMainWindow):
         self.mode_tabs.addTab(
             self._build_reproduce_tab(), "Reproduce Periodicity Paper"
         )
+        self.mode_tabs.addTab(
+            self._build_autoionization_tab(), "Autoionization Computer"
+        )
+        self.mode_tabs.addTab(self._build_kick_tab(), "Kick / Linear Response")
         idx = 1 if getattr(self.config, "mode", "tdse") == "exact_tddft" else 0
         self.mode_tabs.setCurrentIndex(idx)
         self.mode_tabs.currentChanged.connect(self._on_mode_changed)
+        # Style the active tab green so the chosen workflow is unmistakable.
+        self.mode_tabs.setStyleSheet(
+            "QTabBar::tab:selected {"
+            "  background-color: #16a34a;"
+            "  color: white;"
+            "  font-weight: bold;"
+            "}"
+        )
+
+        # ◀ / ▶ navigation buttons sit in the tab-bar corners — that way
+        # the QTabWidget keeps full ownership of its content area below
+        # the tab strip (a horizontal layout around the tabs squashes the
+        # tab pages, which is what was breaking the TDSE tab earlier).
+        self._btn_workflow_prev = QPushButton("◀")
+        self._btn_workflow_prev.setToolTip("Previous workflow tab")
+        self._btn_workflow_prev.setFixedSize(24, 22)
+        self._btn_workflow_prev.clicked.connect(self._on_workflow_prev)
+        self._btn_workflow_next = QPushButton("▶")
+        self._btn_workflow_next.setToolTip("Next workflow tab")
+        self._btn_workflow_next.setFixedSize(24, 22)
+        self._btn_workflow_next.clicked.connect(self._on_workflow_next)
+        self.mode_tabs.setCornerWidget(
+            self._btn_workflow_prev, Qt.TopLeftCorner
+        )
+        self.mode_tabs.setCornerWidget(
+            self._btn_workflow_next, Qt.TopRightCorner
+        )
+
         lay.addWidget(self.mode_tabs)
 
         # Live refresh of the paper-case cards when real_dt changes in
-        # either parameter tab.
-        for mode in ("tdse", "exact_tddft"):
+        # any tab that owns a real_dt spin.
+        for mode in ("tdse", "exact_tddft", "autoionization", "kick"):
             w = self._tab_widgets.get(mode, {}).get("real_dt")
             if w is not None:
                 w.valueChanged.connect(
@@ -856,6 +879,217 @@ class MainWindow(QMainWindow):
         self._refresh_paper_case_cards()
         return tab
 
+    # ------------------------------------------------------------ Autoionization
+
+    def _build_autoionization_tab(self):
+        """Feit-Fleck-Steiger autoionizing spectral projection.
+
+        Runs the TDSE binary with auto_mode=1; only fields relevant to
+        that workflow are shown.
+        """
+        widgets = self._tab_widgets["autoionization"]
+        cfg = self.config
+        tab = QWidget()
+        outer = QVBoxLayout(tab)
+        outer.setContentsMargins(4, 4, 4, 4)
+        outer.addWidget(
+            QLabel(
+                "Extract a state at a target energy by accumulating the\n"
+                "Hann-windowed Fourier component of the field-free TDSE\n"
+                "evolution at that energy. Runs on the TDSE binary."
+            )
+        )
+        self._add_basic_groups(outer, widgets, cfg)
+
+        grp = QGroupBox("Autoionization parameters")
+        g = QVBoxLayout(grp)
+        self._add_spin(
+            g,
+            widgets,
+            "auto_target_energy",
+            "Target energy (a.u.)",
+            -20.0,
+            20.0,
+            cfg.auto_target_energy,
+            is_float=True,
+            decimals=4,
+            tooltip="Centre of the spectral window in atomic units.",
+        )
+        self._add_spin(
+            g,
+            widgets,
+            "n_excited",
+            "N excited states (seed)",
+            0,
+            20,
+            cfg.n_excited,
+            tooltip="Imag-time excited states computed before projection.",
+        )
+        self._add_check(
+            g,
+            widgets,
+            "load_excited",
+            "Load excited states from file",
+            cfg.load_excited,
+        )
+        outer.addWidget(grp)
+        outer.addStretch()
+        return tab
+
+    # ------------------------------------------------------------ Kick
+
+    def _build_kick_tab(self):
+        """Linear-response kick: A(t) = A₀ (constant), Dirac-delta E-field.
+
+        Runs the TDSE binary with laser_pulse_shape="kick".
+        """
+        widgets = self._tab_widgets["kick"]
+        cfg = self.config
+        tab = QWidget()
+        outer = QVBoxLayout(tab)
+        outer.setContentsMargins(4, 4, 4, 4)
+        outer.addWidget(
+            QLabel(
+                "Apply a constant vector potential A₀ to the ground state\n"
+                "and propagate field-free; the dipole spectrum gives the\n"
+                "linear-response excitation peaks. TDSE binary."
+            )
+        )
+        self._add_basic_groups(outer, widgets, cfg, include_laser=False)
+
+        grp = QGroupBox("Kick parameters")
+        g = QVBoxLayout(grp)
+        self._add_spin(
+            g,
+            widgets,
+            "kick_strength",
+            "Kick strength A₀",
+            0.0,
+            1.0,
+            cfg.kick_strength,
+            is_float=True,
+            decimals=4,
+            tooltip="Constant value of A(t). Stronger = larger response, "
+            "weaker = closer to the linear-response limit.",
+        )
+        outer.addWidget(grp)
+        outer.addStretch()
+        return tab
+
+    def _add_basic_groups(self, outer, widgets, cfg, include_laser=True):
+        """Build the shared Grid/Time/(Laser)/Physics groups for a tab."""
+        # Grid
+        grp = QGroupBox("Grid")
+        g = QVBoxLayout(grp)
+        self._add_spin(g, widgets, "grid_nx", "N_x", 10, 10000, cfg.grid_nx)
+        self._add_spin(g, widgets, "grid_ny", "N_y", 10, 10000, cfg.grid_ny)
+        self._add_spin(
+            g, widgets, "grid_dx", "dx", 0.01, 10.0, cfg.grid_dx, True
+        )
+        self._add_spin(
+            g, widgets, "grid_dy", "dy", 0.01, 10.0, cfg.grid_dy, True
+        )
+        outer.addWidget(grp)
+
+        # Time
+        grp = QGroupBox("Time Propagation")
+        g = QVBoxLayout(grp)
+        self._add_spin(
+            g, widgets, "imag_dt", "Imag dt", 0.001, 10.0, cfg.imag_dt, True
+        )
+        self._add_spin(
+            g, widgets, "imag_steps", "Imag steps", 1, 1000000, cfg.imag_steps
+        )
+        self._add_spin(
+            g, widgets, "real_dt", "Real dt", 0.001, 10.0, cfg.real_dt, True
+        )
+        self._add_spin(
+            g, widgets, "real_steps", "Real steps", 1, 1000000, cfg.real_steps
+        )
+        outer.addWidget(grp)
+
+        if include_laser:
+            grp = QGroupBox("Laser (Velocity Gauge)")
+            g = QVBoxLayout(grp)
+            self._add_spin(
+                g,
+                widgets,
+                "laser_freq",
+                "Frequency",
+                0.01,
+                100.0,
+                cfg.laser_freq,
+                True,
+            )
+            self._add_spin(
+                g,
+                widgets,
+                "laser_alpha",
+                "Alpha (E)",
+                0.001,
+                100.0,
+                cfg.laser_alpha,
+                True,
+            )
+            self._add_spin(
+                g,
+                widgets,
+                "laser_cycles",
+                "Cycles (sin² env)",
+                1.0,
+                10000.0,
+                cfg.laser_cycles,
+                True,
+                decimals=1,
+            )
+            outer.addWidget(grp)
+
+        # Physics
+        grp = QGroupBox("Physics")
+        g = QVBoxLayout(grp)
+        self._add_spin(
+            g,
+            widgets,
+            "coulomb_eps",
+            "Coulomb eps",
+            0.01,
+            10.0,
+            cfg.coulomb_eps,
+            True,
+        )
+        self._add_spin(
+            g,
+            widgets,
+            "absorb_ampl",
+            "Absorb ampl",
+            0.0,
+            1000.0,
+            cfg.absorb_ampl,
+            True,
+            decimals=1,
+        )
+        self._add_spin(
+            g,
+            widgets,
+            "ionization_box",
+            "Ionization box",
+            1,
+            10000,
+            cfg.ionization_box,
+        )
+        self._add_check(
+            g,
+            widgets,
+            "load_ground",
+            "Load 2e ground state from file",
+            cfg.load_ground,
+            "Synced across all tabs.",
+        )
+        widgets["load_ground"].toggled.connect(
+            lambda checked: self._sync_load_ground(checked)
+        )
+        outer.addWidget(grp)
+
     def _refresh_paper_case_cards(self):
         """Recompute the displayed total time / real_steps in each case
         card using the current ``real_dt`` from the Exact-TDDFT tab."""
@@ -927,7 +1161,7 @@ class MainWindow(QMainWindow):
         """Mirror the load_ground toggle to every tab + the Reproduce-Paper
         page so it behaves like a single global setting."""
         targets = []
-        for mode in ("tdse", "exact_tddft"):
+        for mode in ("tdse", "exact_tddft", "autoionization", "kick"):
             w = self._tab_widgets.get(mode, {}).get("load_ground")
             if w is not None:
                 targets.append(w)
@@ -1005,18 +1239,43 @@ class MainWindow(QMainWindow):
             f"(real_dt={real_dt:g}). Click Run to launch."
         )
 
-    def _current_mode(self):
-        """Return the solver mode string for the active tab.
+    def _on_workflow_prev(self):
+        idx = self.mode_tabs.currentIndex()
+        if idx > 0:
+            self.mode_tabs.setCurrentIndex(idx - 1)
 
-        Tab index 2 (Reproduce Periodicity Paper) is a *preset* tab, not a solver mode
-        — when active, run as Exact-TDDFT.
+    def _on_workflow_next(self):
+        idx = self.mode_tabs.currentIndex()
+        if idx < self.mode_tabs.count() - 1:
+            self.mode_tabs.setCurrentIndex(idx + 1)
+
+    def _current_workflow(self):
+        """Return the active tab's workflow key — one of:
+        ``tdse``, ``exact_tddft``, ``reproduce``, ``autoionization``, ``kick``.
         """
         idx = self.mode_tabs.currentIndex()
-        return "exact_tddft" if idx >= 1 else "tdse"
+        if 0 <= idx < len(self._TAB_ORDER):
+            return self._TAB_ORDER[idx][0]
+        return "tdse"
+
+    # Workflow → which solver binary to invoke. Reproduce-Paper drives
+    # Exact-TDDFT for the V_KS reconstruction; autoionization and kick
+    # use the TDSE binary (canonical use cases for those modes).
+    _WORKFLOW_BINARY = {
+        "tdse": "tdse",
+        "exact_tddft": "exact_tddft",
+        "reproduce": "exact_tddft",
+        "autoionization": "tdse",
+        "kick": "tdse",
+    }
+
+    def _current_mode(self):
+        """Return the solver-binary mode for the active tab."""
+        return self._WORKFLOW_BINARY.get(self._current_workflow(), "tdse")
 
     def _active_widgets(self):
-        """Widget dict for the currently active mode tab."""
-        return self._tab_widgets[self._current_mode()]
+        """Widget dict for the currently active workflow tab."""
+        return self._tab_widgets[self._current_workflow()]
 
     def _make_controls_group(self):
         grp = QGroupBox("Controls")
@@ -1065,6 +1324,21 @@ class MainWindow(QMainWindow):
         # Per-case view selector — picks which output directory the plot
         # tabs render from. Default "Single run" = self.work_dir; after a
         # paper-batch run, each completed case_N appears here.
+        # FFT dynamic-range knob — drives both the single-case "KS
+        # Potential FFT" tab and the 3-up "Paper FFT Comparison". Increasing
+        # it shows weaker harmonics; decreasing it makes the dominant peaks
+        # more obvious.
+        fft_row = QWidget()
+        fft_lay = QHBoxLayout(fft_row)
+        fft_lay.setContentsMargins(0, 0, 0, 0)
+        fft_lay.addWidget(QLabel("FFT dynamic range (orders):"))
+        self.spin_fft_orders = QSpinBox()
+        self.spin_fft_orders.setRange(1, 10)
+        self.spin_fft_orders.setValue(4)
+        self.spin_fft_orders.valueChanged.connect(self._on_fft_orders_changed)
+        fft_lay.addWidget(self.spin_fft_orders, 1)
+        lay.addWidget(fft_row)
+
         view_row = QWidget()
         view_lay = QHBoxLayout(view_row)
         view_lay.setContentsMargins(0, 0, 0, 0)
@@ -1213,8 +1487,16 @@ class MainWindow(QMainWindow):
             w.setValue(value)
 
     def _collect_config(self):
-        """Read the active tab's widgets into a SimulationConfig."""
+        """Read the active tab's widgets into a SimulationConfig.
+
+        The workflow tab also bakes in its workflow-specific flags so
+        the user doesn't have to juggle them manually:
+        - Autoionization Computer → ``auto_mode = 1``
+        - Kick / Linear Response  → ``laser_pulse_shape = "kick"``,
+          ``kick_mode = 1`` (legacy alias for older binaries)
+        """
         widgets = self._active_widgets()
+        workflow = self._current_workflow()
         mode = self._current_mode()
         kwargs = {"mode": mode}
         for k in self._COMMON_FIELDS:
@@ -1223,6 +1505,14 @@ class MainWindow(QMainWindow):
         for k in self._TDDFT_ONLY_FIELDS:
             if k in widgets:
                 kwargs[k] = self._read_widget(widgets[k])
+
+        if workflow == "autoionization":
+            kwargs["auto_mode"] = 1
+        elif workflow == "kick":
+            kwargs["laser_pulse_shape"] = "kick"
+        else:
+            kwargs["auto_mode"] = 0
+
         self.config = SimulationConfig(**kwargs)
 
     def _populate_spins(self):
@@ -1242,9 +1532,10 @@ class MainWindow(QMainWindow):
         self._on_mode_changed()
 
     # Fields that are *case-determined* when the Reproduce-Paper tab is
-    # active — disable them in the TDSE / Exact-TDDFT tabs so the user
-    # can't accidentally edit values that the batch will overwrite from
-    # the case cards.
+    # active — disable them in the other tabs so the user can't
+    # accidentally edit values that the batch will overwrite. n_excited
+    # is locked to 0 for paper runs since the paper cases don't use
+    # excited states.
     _PAPER_DRIVEN_FIELDS = (
         "laser_pulse_shape",
         "laser_freq",
@@ -1254,16 +1545,23 @@ class MainWindow(QMainWindow):
         "laser_rampdown_cycles",
         "real_dt",
         "real_steps",
+        "n_excited",
+        "excited_imag_mult",
+        "load_excited",
+        "laser_init_state",
     )
 
     def _on_mode_changed(self, *_):
-        """Refresh build status, plot-tab visibility, and freeze
-        case-determined fields when the Reproduce-Paper tab is active."""
+        """Refresh build status, plot-tab visibility, and freeze the
+        fields that the active workflow takes ownership of."""
         if hasattr(self, "build_status_label"):
             self._update_build_status()
         self._apply_tab_visibility()
-        on_repro = self.mode_tabs.currentIndex() == 2
-        for mode in ("tdse", "exact_tddft"):
+        on_repro = self._current_workflow() == "reproduce"
+        # Freeze paper-driven fields in *all other* tabs while the
+        # Reproduce tab is active — they no longer represent what will
+        # actually run, since the per-case cards drive the batch.
+        for mode in ("tdse", "exact_tddft", "autoionization", "kick"):
             for field in self._PAPER_DRIVEN_FIELDS:
                 w = self._tab_widgets.get(mode, {}).get(field)
                 if w is not None:
@@ -1291,6 +1589,47 @@ class MainWindow(QMainWindow):
 
     # ---- Run ----
 
+    @staticmethod
+    def _has_existing_results(out_dir, mode):
+        """Return True iff a previous run's outputs are present.
+
+        We use the observable log as the "completed" sentinel; for
+        Exact-TDDFT we additionally require ``vks_fft.dat`` (only
+        produced at simulation end).
+        """
+        out = Path(out_dir)
+        if not (out / "obser_laser.dat").is_file():
+            return False
+        if mode == "exact_tddft":
+            return (out / "vks_fft.dat").is_file()
+        return True
+
+    def _ask_load_or_run(self, out_dir, mode, summary=None):
+        """Pop a Load / Re-run / Cancel dialog. Returns the choice."""
+        if not self._has_existing_results(out_dir, mode):
+            return "run"
+        box = QMessageBox(self)
+        box.setIcon(QMessageBox.Question)
+        box.setWindowTitle("Existing results found")
+        box.setText(summary or f"Outputs already present in {out_dir}.")
+        box.setInformativeText(
+            "Load the saved results into the plots, or re-run the\n"
+            "simulation from scratch (overwrites the existing files)?"
+        )
+        btn_load = box.addButton("Load", QMessageBox.AcceptRole)
+        btn_run = box.addButton("Re-run", QMessageBox.DestructiveRole)
+        # Cancel button still needs to be created so it shows up in the
+        # dialog; we just don't capture the reference.
+        box.addButton("Cancel", QMessageBox.RejectRole)
+        box.setDefaultButton(btn_load)
+        box.exec_()
+        clicked = box.clickedButton()
+        if clicked is btn_load:
+            return "load"
+        if clicked is btn_run:
+            return "run"
+        return "cancel"
+
     def _on_run(self):
         mode = self._current_mode()
         if not is_solver_built(mode=mode):
@@ -1307,6 +1646,17 @@ class MainWindow(QMainWindow):
 
         self._collect_config()
         self.work_dir.mkdir(parents=True, exist_ok=True)
+
+        # If a previous run already produced outputs in this work_dir,
+        # offer to load them instead of re-running.
+        choice = self._ask_load_or_run(self.work_dir, mode)
+        if choice == "cancel":
+            return
+        if choice == "load":
+            self._log(f"Loading existing results from {self.work_dir}.")
+            self._refresh_all_plots()
+            self._set_progress(100, "Loaded existing results.")
+            return
 
         self._wf_snapshots = []
         self._wf_snap_idx = -1
@@ -1489,6 +1839,34 @@ class MainWindow(QMainWindow):
         self._batch_dirs = {name: Path(d) for name, _, d in parallel_jobs}
         self._batch_cfgs = {name: cfg for name, cfg, _ in parallel_jobs}
 
+        # If every case dir already has a completed run, offer to load
+        # the saved outputs instead of redoing everything.
+        all_done = all(
+            self._has_existing_results(d, "exact_tddft")
+            for d in self._batch_dirs.values()
+        )
+        if all_done:
+            done_names = ", ".join(self._batch_dirs.keys())
+            choice = self._ask_load_or_run(
+                self.work_dir,
+                "exact_tddft",
+                summary=(
+                    f"Saved outputs already exist for all cases "
+                    f"({done_names}) under {self.work_dir}."
+                ),
+            )
+            if choice == "cancel":
+                return
+            if choice == "load":
+                self._log(
+                    f"Loading saved results for {done_names}; "
+                    "no simulation launched."
+                )
+                self._refresh_paper_fft_comparison()
+                self._populate_view_dropdown_from_batch()
+                self._set_progress(100, "Loaded saved batch results.")
+                return
+
         def _materialise_shared_gs():
             import shutil
 
@@ -1637,7 +2015,7 @@ class MainWindow(QMainWindow):
                 title=self._PAPER_CASES[key]["label"],
                 harmonic_min=0.0,
                 harmonic_max=2.5,
-                vmin_orders=4,
+                vmin_orders=int(self.spin_fft_orders.value()),
             )
         c.draw_idle()
 
@@ -1676,6 +2054,35 @@ class MainWindow(QMainWindow):
             if self._active_case_cfg is not None
             else self.config
         )
+
+    def _on_fft_orders_changed(self, *_):
+        """User adjusted the FFT dynamic-range knob — re-render the FFT
+        panels without rebuilding all the other plots."""
+        cfg = self._effective_config()
+        out = self._get_output_dir()
+        # Single-case panel
+        if cfg.mode == "exact_tddft":
+            fft_data = parse_vks_fft(
+                out / getattr(cfg, "vks_fft_file", "vks_fft.dat")
+            )
+            c = self._canvases.get("KS Potential FFT")
+            if c is not None:
+                plot_ks_potential_fft(
+                    c.axes,
+                    fft_data,
+                    title=(
+                        rf"$\log_{{10}}|\hat V_{{\mathrm{{KS}}}}(x,\omega)|^2$  "
+                        rf"$\omega_L$={cfg.laser_freq:g}, "
+                        rf"E={cfg.laser_alpha:g}"
+                    ),
+                    harmonic_min=0.0,
+                    harmonic_max=2.5,
+                    vmin_orders=int(self.spin_fft_orders.value()),
+                )
+                c.clear_and_draw()
+        # 3-up comparison panel
+        if hasattr(self, "_batch_dirs"):
+            self._refresh_paper_fft_comparison()
 
     def _on_view_case_changed(self, *_):
         case_key = self.cmb_view_case.currentData()
@@ -2019,7 +2426,7 @@ class MainWindow(QMainWindow):
                 ),
                 harmonic_min=0.0,
                 harmonic_max=2.5,
-                vmin_orders=4,
+                vmin_orders=int(self.spin_fft_orders.value()),
             )
             c.clear_and_draw()
 
@@ -2077,8 +2484,28 @@ class MainWindow(QMainWindow):
         except Exception as e:
             self._log(f"GIF creation failed: {e}")
 
+    def _save_blocked_message(self):
+        """Reason the save buttons should be inert mid-run, or None."""
+        if self._sim_worker is not None and self._sim_worker.isRunning():
+            return "Wait for the simulation to finish before saving plots."
+        if (
+            getattr(self, "_batch_worker", None) is not None
+            and self._batch_worker.isRunning()
+        ):
+            return "Wait for the batch to finish before saving plots."
+        if (
+            getattr(self, "_build_worker", None) is not None
+            and self._build_worker.isRunning()
+        ):
+            return "Wait for the build to finish before saving plots."
+        return None
+
     def _on_save_current_plot(self):
-        """Save the currently visible tab's figure to file."""
+        """Save the currently visible tab's figure to file (PNG or SVG)."""
+        block = self._save_blocked_message()
+        if block:
+            QMessageBox.information(self, "Plot save unavailable", block)
+            return
         tab_name = self.tabs.tabText(self.tabs.currentIndex())
         canvas = self._canvases.get(tab_name)
         if canvas is None:
@@ -2088,26 +2515,38 @@ class MainWindow(QMainWindow):
             self,
             "Save Plot",
             f"{tab_name.replace(' ', '_')}.png",
-            "PNG (*.png);;SVG (*.svg);;PDF (*.pdf)",
+            "PNG (*.png);;SVG (*.svg)",
         )
-        if path:
-            canvas.fig.savefig(path, dpi=150, bbox_inches="tight")
-            self._log(f"Saved: {path}")
+        if not path:
+            return
+        # Force the right extension if the user didn't type one.
+        ext = Path(path).suffix.lower()
+        if ext not in (".png", ".svg"):
+            path = path + ".png"
+        canvas.fig.savefig(path, dpi=150, bbox_inches="tight")
+        self._log(f"Saved: {path}")
 
     def _on_save_all_plots(self):
-        """Save all plot figures to a chosen directory."""
+        """Save every plot tab's figure to a chosen directory (PNG or SVG)."""
+        block = self._save_blocked_message()
+        if block:
+            QMessageBox.information(self, "Plot save unavailable", block)
+            return
         directory = QFileDialog.getExistingDirectory(
             self, "Select output directory"
         )
         if not directory:
             return
+        # Ask for format only; filename is not actually used.
         fmt, _ = QFileDialog.getSaveFileName(
             self,
-            "Choose format (enter any filename with .png/.svg/.pdf)",
+            "Choose format (filename name doesn't matter — just pick PNG or SVG)",
             "plots.png",
-            "PNG (*.png);;SVG (*.svg);;PDF (*.pdf)",
+            "PNG (*.png);;SVG (*.svg)",
         )
-        ext = Path(fmt).suffix if fmt else ".png"
+        ext = Path(fmt).suffix.lower() if fmt else ".png"
+        if ext not in (".png", ".svg"):
+            ext = ".png"
         saved = 0
         for name, canvas in self._canvases.items():
             fname = Path(directory) / (
@@ -2118,7 +2557,7 @@ class MainWindow(QMainWindow):
                 saved += 1
             except Exception as e:
                 self._log(f"Could not save {name}: {e}")
-        self._log(f"Saved {saved} plots to {directory}")
+        self._log(f"Saved {saved} plots ({ext}) to {directory}")
 
     def _on_load_excited_states(self):
         """Scan output directory for wf_excited_N.dat files and display them."""

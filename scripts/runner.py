@@ -151,6 +151,92 @@ def run_simulation(config, work_dir, solver_dir=None, on_output=None):
             except OSError:
                 pass
 
+    # Validate cached ground-state files against the requested grid. If
+    # the user changed grid_nx/ny since the last run, ``wf_ground.dat``
+    # (etc.) has the wrong number of lines for direct loading. Instead
+    # of recomputing, we infer the *small* grid the file was built at
+    # (assumed square for the 2D ground state, direct for the 1D files)
+    # and tell the C++ binary to read at that small grid and regrid onto
+    # the current grid via ``wavefunction::regrid``.
+    nx = int(config.grid_nx)
+    ny = int(config.grid_ny)
+    config.regrid_from_nx_2e = 0
+    config.regrid_from_nx_1e = 0
+
+    p2e = work_dir / "wf_ground.dat"
+    if p2e.is_file():
+        try:
+            with open(p2e, "rb") as f:
+                lines = sum(1 for _ in f)
+        except OSError:
+            lines = nx * ny
+        if lines != nx * ny:
+            small = int(round(lines**0.5))
+            if small * small == lines:
+                config.regrid_from_nx_2e = small
+                if on_output:
+                    on_output(
+                        f"wf_ground.dat is {small}×{small} (was computed "
+                        f"on a smaller grid). Will regrid onto {nx}×{ny} "
+                        f"via wavefunction::regrid at startup."
+                    )
+            else:
+                msg = (
+                    f"WARNING: wf_ground.dat has {lines} lines, not a "
+                    f"square shape; cannot infer a regrid source. "
+                    f"Renaming to wf_ground.dat.stale and recomputing."
+                )
+                if on_output:
+                    on_output(msg)
+                try:
+                    p2e.rename(p2e.with_suffix(p2e.suffix + ".stale"))
+                except OSError:
+                    pass
+                config.load_ground = 0
+
+    # 1D ground orbitals (He+ and KS): line count = small_nx directly.
+    for fname in ("wf_heliumplus.dat", "ks_ground.dat"):
+        path = work_dir / fname
+        if not path.is_file():
+            continue
+        try:
+            with open(path, "rb") as f:
+                lines = sum(1 for _ in f)
+        except OSError:
+            continue
+        if lines != nx:
+            # All 1D auxiliary files share the same small grid — use the
+            # *first* one we see to set regrid_from_nx_1e.
+            if config.regrid_from_nx_1e == 0:
+                config.regrid_from_nx_1e = lines
+                if on_output:
+                    on_output(
+                        f"{fname} has length {lines} (smaller grid). "
+                        f"Will regrid onto {nx} via wavefunction::regrid."
+                    )
+
+    # Excited-state files are not regridded (they're per-state, generally
+    # not produced at multiple grids). Force-disable load_excited if the
+    # current grid_nx/ny doesn't match any present excited file.
+    for path in work_dir.glob("wf_excited_*.dat"):
+        try:
+            with open(path, "rb") as f:
+                lines = sum(1 for _ in f)
+        except OSError:
+            continue
+        if lines != nx * ny:
+            if getattr(config, "load_excited", 0):
+                if on_output:
+                    on_output(
+                        f"{path.name} grid mismatch ({lines} vs {nx*ny}); "
+                        "disabling load_excited for this run."
+                    )
+                config.load_excited = 0
+            try:
+                path.rename(path.with_suffix(path.suffix + ".stale"))
+            except OSError:
+                pass
+
     # Write config file, overriding output_dir to "." since cwd is work_dir
     config_path = work_dir / "simulation.cfg"
     config.output_dir = "."

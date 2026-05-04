@@ -53,6 +53,8 @@ static double cfg_absorb_ampl = 50.0;
 // and the initial KS orbital are derived artefacts and are auto-loaded
 // from disk if their files exist, else recomputed.
 static int    cfg_load_ground = 0;
+static long   cfg_regrid_from_nx_2e = 0;
+static long   cfg_regrid_from_nx_1e = 0;
 static long   cfg_heplus_imag_steps = 0;  // 0 -> reuse cfg_no_of_imag_timesteps
 
 // Constant A_0 used when laser_pulse_shape == "kick".
@@ -112,6 +114,8 @@ static void read_config(const char* filename)
       else if (strcmp(key, "coulomb_eps") == 0)     cfg_coulomb_eps = atof(value);
       else if (strcmp(key, "absorb_ampl") == 0)     cfg_absorb_ampl = atof(value);
       else if (strcmp(key, "load_ground") == 0)     cfg_load_ground = atoi(value);
+      else if (strcmp(key, "regrid_from_nx_2e") == 0) cfg_regrid_from_nx_2e = atol(value);
+      else if (strcmp(key, "regrid_from_nx_1e") == 0) cfg_regrid_from_nx_1e = atol(value);
       else if (strcmp(key, "heplus_imag_steps") == 0) cfg_heplus_imag_steps = atol(value);
       else if (strcmp(key, "kick_strength") == 0)   cfg_kick_strength = atof(value);
       else if (strcmp(key, "fft_n_omega") == 0)     cfg_fft_n_omega = atol(value);
@@ -242,7 +246,22 @@ int main(int argc, char **argv)
   if (cfg_load_ground && file_exists(p_ground)) {
     cout << "Loading 2e ground state from " << p_ground << endl;
     FILE* f = fopen(p_ground, "r");
-    wf.init(g, 99, 0.1, 0.0, 0.0, f, 0);
+    if (cfg_regrid_from_nx_2e > 0 && cfg_regrid_from_nx_2e != ngpsx) {
+      long sn = cfg_regrid_from_nx_2e;
+      cout << "  cached grid is " << sn << "x" << sn
+           << "; regridding onto " << ngpsx << "x" << ngpsy << endl;
+      grid g_small;
+      g_small.set_dim(g.dimens());
+      g_small.set_ngps(sn, sn, ngpsz);
+      g_small.set_delt(deltx, delty, deltz);
+      g_small.set_offs(sn / 2, sn / 2, 0);
+      wavefunction wfread(sn * sn);
+      wfread.init(g_small, 99, 0.1, 0.0, 0.0, f, 0);
+      wf.nullify();
+      wf.regrid(g, g_small, wfread);
+    } else {
+      wf.init(g, 99, 0.1, 0.0, 0.0, f, 0);
+    }
     fclose(f);
     wf *= 1.0 / sqrt(wf.norm(g));
     complenerg = wf.energy(0.0, g, hamilton, me, masses,
@@ -278,7 +297,22 @@ int main(int argc, char **argv)
   if (file_exists(p_heplus)) {
     cout << "Loading He+ ground state from " << p_heplus << endl;
     FILE* f = fopen(p_heplus, "r");
-    wfheliumplus.init(gone, 99, 0.1, 0.0, 0.0, f, 0);
+    if (cfg_regrid_from_nx_1e > 0 && cfg_regrid_from_nx_1e != gone.ngps_x()) {
+      long sn = cfg_regrid_from_nx_1e;
+      cout << "  cached length is " << sn
+           << "; regridding onto " << gone.ngps_x() << endl;
+      grid gone_small;
+      gone_small.set_dim(gone.dimens());
+      gone_small.set_ngps(sn, 1, 1);
+      gone_small.set_delt(deltx, 1.0, 1.0);
+      gone_small.set_offs(sn / 2, 0, 0);
+      wavefunction wfread(sn);
+      wfread.init(gone_small, 99, 0.1, 0.0, 0.0, f, 0);
+      wfheliumplus.nullify();
+      wfheliumplus.regrid(gone, gone_small, wfread);
+    } else {
+      wfheliumplus.init(gone, 99, 0.1, 0.0, 0.0, f, 0);
+    }
     fclose(f);
     wfheliumplus *= 1.0 / sqrt(wfheliumplus.norm(gone));
   } else {
@@ -308,7 +342,22 @@ int main(int argc, char **argv)
   if (file_exists(p_ks_ground)) {
     cout << "Loading KS ground orbital from " << p_ks_ground << endl;
     FILE* f = fopen(p_ks_ground, "r");
-    kohnshamorbital.init(gone, 99, 0.1, 0.0, 0.0, f, 0);
+    if (cfg_regrid_from_nx_1e > 0 && cfg_regrid_from_nx_1e != gone.ngps_x()) {
+      long sn = cfg_regrid_from_nx_1e;
+      cout << "  cached length is " << sn
+           << "; regridding onto " << gone.ngps_x() << endl;
+      grid gone_small;
+      gone_small.set_dim(gone.dimens());
+      gone_small.set_ngps(sn, 1, 1);
+      gone_small.set_delt(deltx, 1.0, 1.0);
+      gone_small.set_offs(sn / 2, 0, 0);
+      wavefunction wfread(sn);
+      wfread.init(gone_small, 99, 0.1, 0.0, 0.0, f, 0);
+      kohnshamorbital.nullify();
+      kohnshamorbital.regrid(gone, gone_small, wfread);
+    } else {
+      kohnshamorbital.init(gone, 99, 0.1, 0.0, 0.0, f, 0);
+    }
     fclose(f);
   } else {
     cout << "Building KS ground orbital from 2e GS density (1D marginal)" << endl;

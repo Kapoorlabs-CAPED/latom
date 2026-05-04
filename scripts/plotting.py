@@ -475,20 +475,36 @@ def plot_spectrum(ax, data, dt=None):
     ax.grid(True, alpha=0.3)
 
 
-def plot_linear_response_spectrum(ax, data, ground_energy=None, dt=None):
-    """Plot linear response absorption spectrum from kick-mode dipole data.
+def plot_linear_response_spectrum(
+    ax,
+    data,
+    ground_energy=None,
+    dt=None,
+    omega_max=None,
+    n_peaks=8,
+    peak_prominence_dB=20.0,
+):
+    """Plot |d(ω)|² from kick-mode dipole data and mark dominant peaks.
 
-    Computes the FFT of the total dipole d(t) = <x1>(t) + <x2>(t).
-    Peaks appear at omega_n = E_n - E_0 (transition energies from the
-    ground state).
+    The kick run gives d(t) = ⟨x₁⟩(t) + ⟨x₂⟩(t). Its FFT |d(ω)|² has
+    peaks at the transition energies ω_n = E_n − E_0 (so peaks live on
+    the positive-ω axis even though E_0 itself is negative). This
+    function locates the strongest peaks, draws a dashed vertical line
+    at each one, and labels it with ω_n (and E_n = E_0 + ω_n when the
+    ground-state energy is supplied).
 
     Args:
-        ax: Matplotlib Axes object.
-        data: DataFrame from parse_real_observables (kick mode run).
-        ground_energy: Ground state energy in a.u. If provided, x-axis
-            shows absolute energies E_n = E_0 + omega instead of omega.
-        dt: Time step. If None, computed from data.
+        ax: Matplotlib Axes.
+        data: DataFrame from parse_real_observables (kick run).
+        ground_energy: E_0 in a.u. — annotated alongside ω_n if given.
+        dt: time step; auto from ``data["time"]`` when None.
+        omega_max: clip the x-axis to [0, omega_max] (defaults to a.u. 5).
+        n_peaks: keep at most this many strongest peaks.
+        peak_prominence_dB: minimum prominence (in dB below the spectrum
+            max) required for a peak to be marked.
     """
+    from scipy.signal import find_peaks
+
     ax.clear()
     if data is None:
         ax.set_title("No data")
@@ -497,55 +513,77 @@ def plot_linear_response_spectrum(ax, data, ground_energy=None, dt=None):
     t = data["time"].values
     ex = data["expect_x"].values
     ey = data["expect_y"].values
-
     if len(t) < 10:
         ax.set_title("Insufficient data for spectrum")
         return
-
     if dt is None:
         dt = t[1] - t[0]
     if dt <= 0:
         ax.set_title("Invalid time step")
         return
 
-    # Total dipole
-    dipole = ex + ey
-
-    # Subtract mean (DC component)
-    dipole = dipole - dipole.mean()
-
-    # Apply Hann window
+    dipole = (ex + ey) - (ex + ey).mean()
     window = np.hanning(len(dipole))
-    dipole_windowed = dipole * window
+    spec = np.abs(np.fft.rfft(dipole * window)) ** 2
+    freqs = np.fft.rfftfreq(len(dipole), d=dt)
+    omega = freqs * 2.0 * np.pi
 
-    # FFT
-    spectrum = np.abs(np.fft.rfft(dipole_windowed)) ** 2
-    freqs = np.fft.rfftfreq(len(dipole_windowed), d=dt)
-    omega = freqs * 2.0 * np.pi  # angular frequency
+    spec = np.clip(spec, 1e-30, None)
+    if omega_max is None:
+        omega_max = 5.0
+    keep = omega <= omega_max
+    omega = omega[keep]
+    spec = spec[keep]
 
-    spectrum = np.clip(spectrum, 1e-30, None)
+    pmax = spec.max()
+    ax.semilogy(omega, spec, "b-", linewidth=0.7)
 
-    if ground_energy is not None:
-        # Show absolute energy E_n = E_0 + omega
-        energies = abs(ground_energy) + omega
-        ax.semilogy(energies, spectrum, "b-", linewidth=0.5)
-        ax.set_xlabel("Energy (a.u.)")
-        ax.set_title("Linear Response Spectrum (absolute energies)")
-        ax.axvline(
-            x=abs(ground_energy),
-            color="r",
-            linestyle="--",
-            alpha=0.5,
-            label=f"$E_0$ = {abs(ground_energy):.3f}",
-        )
-        ax.legend(fontsize=8)
-    else:
-        ax.semilogy(omega, spectrum, "b-", linewidth=0.5)
-        ax.set_xlabel(r"$\omega$ (a.u.)")
-        ax.set_title("Linear Response Absorption Spectrum")
+    # Find peaks above the prominence floor. We work in log space so
+    # `prominence` is in orders-of-magnitude units.
+    log_spec = np.log10(spec / pmax)
+    min_prom = peak_prominence_dB / 10.0  # dB → orders of magnitude (≈)
+    peak_idx, props = find_peaks(log_spec, prominence=min_prom)
+    if len(peak_idx) > 0:
+        # Keep the n_peaks strongest by raw spectrum amplitude.
+        order = np.argsort(spec[peak_idx])[::-1][:n_peaks]
+        peak_idx = np.sort(peak_idx[order])
 
+        ymin, ymax = ax.get_ylim()
+        for k in peak_idx:
+            w_n = omega[k]
+            ax.axvline(
+                w_n,
+                color="r",
+                linestyle="--",
+                linewidth=0.7,
+                alpha=0.7,
+            )
+            if ground_energy is not None:
+                E_n = ground_energy + w_n
+                label = rf"$\omega$={w_n:.3f}" "\n" rf"$E$={E_n:.3f}"
+            else:
+                label = rf"$\omega$={w_n:.3f}"
+            ax.annotate(
+                label,
+                xy=(w_n, spec[k]),
+                xytext=(2, -2),
+                textcoords="offset points",
+                fontsize=7,
+                color="r",
+                ha="left",
+                va="top",
+            )
+
+    ax.set_xlabel(r"$\omega$ (a.u.)")
     ax.set_ylabel(r"$|d(\omega)|^2$ (arb. units)")
-    ax.grid(True, alpha=0.3)
+    if ground_energy is not None:
+        ax.set_title(
+            rf"Linear-response spectrum  ($E_0$={ground_energy:.3f} a.u.)"
+        )
+    else:
+        ax.set_title("Linear-response absorption spectrum")
+    ax.set_xlim(0.0, omega_max)
+    ax.grid(True, which="both", alpha=0.3)
 
 
 def plot_norm(ax, data, phase="real"):

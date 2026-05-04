@@ -36,6 +36,8 @@ latom_work
 
 *.dat
 *.gif
+# Test artefacts (sanity-check PNGs, etc.) — regenerated on every run.
+tests/*.png
 # Installer logs
 pip-log.txt
 pip-delete-this-directory.txt
