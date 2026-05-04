@@ -168,15 +168,19 @@ def plot_ks_potential_fft(
     ax,
     fft_data,
     title=None,
-    harmonic_min=0.0,
+    harmonic_min=0.5,
     harmonic_max=2.5,
     vmin_orders=4,
     cmap="hot_r",
 ):
-    """Plot |V_KS(x, ω)|² as a 2D log-scale contour.
+    """Plot |V_KS(x, ω)|² as a 2D log-scale contour, raw (un-normalised).
 
     Reads pre-computed FFT data produced online by ExactTDDFT.cc — no
-    Python-side FFT, so there's no aliasing from snapshot cadence.
+    Python-side FFT and no normalisation. The C++ already applies a
+    Hann window before accumulating the integral, so the spectrum is
+    leakage-cleaned at source. The DC region is hidden by default
+    (``harmonic_min=0.5``) since it's dominated by the static atomic
+    potential and visually swamps the harmonic peaks.
 
     Args:
         ax: Matplotlib Axes.
@@ -184,10 +188,10 @@ def plot_ks_potential_fft(
             ``x``, ``omega``, ``harmonic``, ``power``, ``omega_L``.
         title: optional axes title.
         harmonic_min, harmonic_max: x-axis range in units of ω/ω_L.
-        vmin_orders: orders of magnitude below the peak shown by colour.
+        vmin_orders: orders of magnitude below the in-window peak that
+            the colour map covers.
         cmap: matplotlib colormap name.
     """
-    # Drop any previous colorbar to avoid stacking on repeated refreshes.
     if hasattr(ax, "_latom_cbar"):
         try:
             ax._latom_cbar.remove()
@@ -202,32 +206,39 @@ def plot_ks_potential_fft(
     x = fft_data["x"]
     harmonic = fft_data["harmonic"]
     power = np.asarray(fft_data["power"])  # shape (nx, n_omega)
-    pmax = power.max()
-    if pmax <= 0:
-        ax.set_title("V_KS FFT is identically zero")
-        return
-    log_power = np.log10(np.clip(power / pmax, 10 ** (-vmin_orders - 2), None))
 
     keep = (harmonic >= harmonic_min) & (harmonic <= harmonic_max)
+    if not keep.any():
+        ax.set_title(
+            f"FFT range exhausted (harmonic axis ends at "
+            f"{harmonic.max():.2f} < harmonic_min={harmonic_min})"
+        )
+        return
+
+    # Raw log10|F|² — no global normalisation. Colour scale spans
+    # vmin_orders below the *in-window* peak so the harmonic structure
+    # is visible regardless of overall magnitude.
+    log_power = np.log10(np.clip(power, 1e-300, None))
+    vmax = log_power[:, keep].max()
+    vmin = vmax - vmin_orders
+
     im = ax.pcolormesh(
         harmonic[keep],
         x,
         log_power[:, keep],
-        vmin=-vmin_orders,
-        vmax=0.0,
+        vmin=vmin,
+        vmax=vmax,
         cmap=cmap,
         shading="auto",
     )
     ax.set_xlabel(r"Harmonic order $\omega / \omega_L$")
     ax.set_ylabel("x (a.u.)")
-    ax.set_title(
-        title or r"$\log_{10}|\hat V_{\mathrm{KS}}(x,\omega)|^2$ (norm.)"
-    )
+    ax.set_title(title or r"$\log_{10}|\hat V_{\mathrm{KS}}(x,\omega)|^2$")
     ax.set_xlim(harmonic_min, harmonic_max)
     ax.set_ylim(x[0], x[-1])
 
     cbar = ax.figure.colorbar(im, ax=ax, fraction=0.046, pad=0.04)
-    cbar.set_label(r"$\log_{10}(|\hat V|^2 / \max)$")
+    cbar.set_label(r"$\log_{10}|\hat V_{\mathrm{KS}}(x,\omega)|^2$")
     ax._latom_cbar = cbar
 
 

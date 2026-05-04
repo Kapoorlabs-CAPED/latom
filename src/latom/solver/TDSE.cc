@@ -620,7 +620,10 @@ double vecpot_x(double time, int me)
 
   double frequ    = cfg_laser_freq;
   double alphahat = cfg_laser_alpha;
-  double ampl     = alphahat * frequ;  // A_amp = alpha * omega
+  // alphahat is the *electric-field* amplitude E_0 (config: laser_alpha).
+  // The vector-potential amplitude in velocity gauge is A_0 = E_0 / omega
+  // (since A(t) = A_0 sin(ωt) gives E(t) = -A_0 ω cos(ωt), |E|_max = A_0 ω).
+  double ampl     = alphahat / frequ;  // A_0 = E_0 / omega
 
   double phi = cfg_laser_phi;
 

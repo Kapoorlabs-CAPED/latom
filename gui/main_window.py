@@ -442,7 +442,8 @@ class MainWindow(QMainWindow):
             100.0,
             cfg.laser_alpha,
             True,
-            tooltip="Electric-field amplitude. A_max = alpha × ω.",
+            tooltip="Electric-field amplitude E_0. The vector-potential "
+            "amplitude in velocity gauge is A_0 = E_0 / ω.",
         )
         self._add_spin(
             g,
@@ -605,9 +606,10 @@ class MainWindow(QMainWindow):
         outer.addStretch()
         return tab
 
-    # Paper-reproduction cases. ω = laser_freq, E = laser_alpha (latom's
-    # convention sets A_amp = alpha · omega, so passing E in laser_alpha
-    # gives the paper's stated A_max = ω·E directly).
+    # Paper-reproduction cases. ω = laser_freq, E = laser_alpha
+    # (electric-field amplitude). The C++ kernel computes the
+    # vector-potential amplitude as A_0 = E / ω — the standard velocity-
+    # gauge identity, since A(t) = A_0 sin(ωt) implies E(t) = -A_0 ω cos(ωt).
     @staticmethod
     def _pulse_total_time(shape, freq, cycles, ramp, plateau, rampdown=0.0):
         """Return the total propagation time (a.u.) implied by the pulse.
@@ -863,8 +865,8 @@ class MainWindow(QMainWindow):
         btn_all = QPushButton("Run all three cases (parallel)")
         btn_all.setToolTip(
             "Spawns three ExactTDDFT subprocesses concurrently. The Paper "
-            "FFT Comparison tab populates as cases complete; switch the "
-            "View dropdown to inspect any single case's full plot set."
+            "FFT Comparison tab populates as cases complete; pick a case "
+            "in the View dropdown below to inspect its full plot set live."
         )
         btn_all.setStyleSheet(
             "QPushButton { background-color: #2e7dd7; color: white;"
@@ -873,6 +875,22 @@ class MainWindow(QMainWindow):
         )
         btn_all.clicked.connect(self._on_run_paper_batch)
         outer.addWidget(btn_all)
+
+        # View-case dropdown lives ON THIS TAB so it's contextually
+        # obvious that it controls which case the plot panels render.
+        # Unset by default (no auto-selection); the user picks the case
+        # they want to inspect after the batch is launched.
+        view_grp = QGroupBox("View case in plot panels")
+        view_lay = QHBoxLayout(view_grp)
+        view_lay.setContentsMargins(8, 6, 8, 6)
+        view_lay.addWidget(QLabel("Show:"))
+        self.cmb_view_case = QComboBox()
+        self.cmb_view_case.addItem("(none — pick a case)", None)
+        self.cmb_view_case.currentIndexChanged.connect(
+            self._on_view_case_changed
+        )
+        view_lay.addWidget(self.cmb_view_case, 1)
+        outer.addWidget(view_grp)
 
         outer.addStretch()
         # Initial population.
@@ -1339,17 +1357,8 @@ class MainWindow(QMainWindow):
         fft_lay.addWidget(self.spin_fft_orders, 1)
         lay.addWidget(fft_row)
 
-        view_row = QWidget()
-        view_lay = QHBoxLayout(view_row)
-        view_lay.setContentsMargins(0, 0, 0, 0)
-        view_lay.addWidget(QLabel("View:"))
-        self.cmb_view_case = QComboBox()
-        self.cmb_view_case.addItem("Single run", None)
-        self.cmb_view_case.currentIndexChanged.connect(
-            self._on_view_case_changed
-        )
-        view_lay.addWidget(self.cmb_view_case, 1)
-        lay.addWidget(view_row)
+        # The "View case" dropdown lives on the Reproduce-Paper tab —
+        # see _build_reproduce_tab. No global selector here.
 
         btn_row3 = QWidget()
         btn_layout3 = QHBoxLayout(btn_row3)
@@ -1904,6 +1913,11 @@ class MainWindow(QMainWindow):
         self.btn_stop.setEnabled(True)
         self.progress_bar.setRange(0, 100)
         self._set_progress(0, f"Launching batch ({len(parallel_jobs)} cases)…")
+        # Pre-populate the View-case dropdown with the *running* cases
+        # so the user can rotate through them while the batch runs.
+        # No auto-selection — the user explicitly picks which case to
+        # render; until they do, the plots stay on whatever they were.
+        self._populate_view_dropdown_from_batch()
         # Start the batch poller so the progress bar is driven by real
         # propagation time, not just by case-completion count.
         if not hasattr(self, "_batch_poll_timer"):
@@ -1979,6 +1993,21 @@ class MainWindow(QMainWindow):
         bits = ", ".join(f"{k}={tn:.0f}/{tT:.0f}" for k, tn, tT in per_case)
         self._set_progress(pct, f"batch {pct:.1f}% — {bits} a.u.")
 
+        # Live plot refresh for the case currently selected in the View
+        # dropdown. _refresh_all_plots reads from _get_output_dir() which
+        # already routes to the active case's directory, so the energy
+        # / dipole / ionization / live-snapshot panels populate as the
+        # subprocess writes to disk. The Paper FFT Comparison only
+        # populates when each case finishes (vks_fft.dat is written at
+        # simulation end), so no need to refresh that here.
+        if self._active_case_dir is not None:
+            try:
+                self._refresh_all_plots()
+            except Exception as e:
+                # Non-fatal — partial files mid-write can briefly trip
+                # parsers; just skip this tick.
+                self._log(f"poll refresh: {e}")
+
     def _refresh_paper_fft_comparison(self):
         """Render |V_KS(x,ω)|² for each finished case into the 1×3 panel."""
         if not hasattr(self, "_batch_dirs"):
@@ -2013,7 +2042,7 @@ class MainWindow(QMainWindow):
                 ax,
                 fft_data,
                 title=self._PAPER_CASES[key]["label"],
-                harmonic_min=0.0,
+                harmonic_min=0.5,
                 harmonic_max=2.5,
                 vmin_orders=int(self.spin_fft_orders.value()),
             )
@@ -2075,7 +2104,7 @@ class MainWindow(QMainWindow):
                         rf"$\omega_L$={cfg.laser_freq:g}, "
                         rf"E={cfg.laser_alpha:g}"
                     ),
-                    harmonic_min=0.0,
+                    harmonic_min=0.5,
                     harmonic_max=2.5,
                     vmin_orders=int(self.spin_fft_orders.value()),
                 )
@@ -2104,14 +2133,13 @@ class MainWindow(QMainWindow):
         self._refresh_all_plots()
 
     def _populate_view_dropdown_from_batch(self):
-        """Add (or refresh) entries for completed batch cases."""
+        """Refresh the dropdown's case list from the running/completed batch."""
         if not hasattr(self, "_batch_dirs"):
             return
-        # Remember current selection; rebuild keeping it where possible.
         current = self.cmb_view_case.currentData()
         self.cmb_view_case.blockSignals(True)
         self.cmb_view_case.clear()
-        self.cmb_view_case.addItem("Single run", None)
+        self.cmb_view_case.addItem("(none — pick a case)", None)
         for case_key in self._PAPER_CASES.keys():
             d = self._batch_dirs.get(case_key)
             if d is None or not d.exists():
@@ -2424,7 +2452,7 @@ class MainWindow(QMainWindow):
                     rf"$\omega_L$={cfg.laser_freq:g}, "
                     rf"E={cfg.laser_alpha:g}"
                 ),
-                harmonic_min=0.0,
+                harmonic_min=0.5,
                 harmonic_max=2.5,
                 vmin_orders=int(self.spin_fft_orders.value()),
             )

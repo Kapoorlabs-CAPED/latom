@@ -406,9 +406,14 @@ int main(int argc, char **argv)
   }
   std::vector<complex<double>> Fhat(size1d * (size_t)n_omega,
                                     complex<double>(0.0, 0.0));
+  // Hann window: V_KS(x, t) is multiplied by w(t) = 0.5(1 - cos(2π t / T))
+  // before each accumulation. Suppresses spectral leakage from the
+  // finite-duration record without any post-processing.
+  double T_total_fft = (double)no_of_real * real_timestep;
   cout << "Online V_KS FFT: n_omega=" << n_omega
        << "  ω range = [" << omega_min_fft << ", " << omega_max_fft
-       << "] a.u.  (harmonic 0..." << cfg_fft_harmonic_max << ")" << endl;
+       << "] a.u.  (harmonic 0..." << cfg_fft_harmonic_max << ")"
+       << "  (Hann window over T=" << T_total_fft << " a.u.)" << endl;
 
   for (long ts = 0; ts < no_of_real; ts++) {
     double time = real_timestep * (double)ts;
@@ -439,19 +444,20 @@ int main(int argc, char **argv)
     {
       double dt_step = real(timestep);
       double cur_time = time;
+      // Hann window factor — applied to the signal V_KS(x, t) before the
+      // FFT integral, so the spectrum we dump is already cleaned of
+      // rectangular-window sinc lobes. No post-processing needed.
+      double hann_w = 0.5 * (1.0 - cos(2.0 * M_PI * cur_time
+                                       / std::max(T_total_fft, 1e-30)));
       #pragma omp parallel for schedule(static)
       for (long j = 0; j < n_omega; j++) {
         double phase_arg = -omegas_fft[j] * cur_time;
         complex<double> phase_dt = complex<double>(cos(phase_arg),
                                                    sin(phase_arg)) * dt_step;
-        complex<double>* row = Fhat.data() + (size_t)j;  // stride-major over j
-        // Stride layout: F[ix, j] with ix outer; column-major access for j
-        // per ix is cache-friendly.
         for (long ix = 0; ix < size1d; ix++) {
-          double v = real(realpot[ix]);
+          double v = real(realpot[ix]) * hann_w;
           Fhat[(size_t)ix * (size_t)n_omega + (size_t)j] += v * phase_dt;
         }
-        (void)row;
       }
     }
 
@@ -565,7 +571,9 @@ double vecpot_x(double time, int me)
 
   double frequ    = cfg_laser_freq;
   double alphahat = cfg_laser_alpha;
-  double ampl     = alphahat * frequ;
+  // alphahat is the *electric-field* amplitude E_0 (config: laser_alpha).
+  // A_0 = E_0 / omega in velocity gauge.
+  double ampl     = alphahat / frequ;
 
   double phi = cfg_laser_phi;
 
