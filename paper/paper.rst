@@ -330,22 +330,140 @@ below the laser carrier itself and harmonic peaks vanish from the
 spectrum.
 
 ``latom`` instead accumulates the Fourier integral *online* inside
-the real-time loop:
+the real-time loop. For each spatial grid point :math:`x` and each
+frequency :math:`\omega_j` in a user-chosen grid we evaluate the
+discrete sum
 
 .. math::
 
-   \hat v_{\rm KS}(x, \omega_k) =
-      \sum_{n=0}^{N-1} v_{\rm KS}(x, n\Delta t)\,
-                       e^{-i \omega_k n \Delta t}\, \Delta t,
+   \hat v_{\rm KS}(x, \omega_j)
+   = \int_0^T v_{\rm KS}(x, t)\, w(t)\, e^{-i\omega_j t}\, dt
+   \;\approx\; \sum_{n=0}^{N-1} v_{\rm KS}(x, n\Delta t)\,
+              w(n\Delta t)\, e^{-i\omega_j\, n\Delta t}\, \Delta t,
 
-over a user-chosen frequency grid :math:`\{\omega_k\}` spanning
-``fft_harmonic_min`` to ``fft_harmonic_max`` in units of
-:math:`\omega_L`. The inner loop is parallelised across
-:math:`\omega` with OpenMP. At simulation end the normalised power
-:math:`|\hat v_{\rm KS}(x, \omega_k)|^2` is dumped to
-``vks_fft.dat`` for plotting. Because the integral is sampled at
-the full real-time step, there is no aliasing regardless of how
-often (or rarely) snapshots are written to disk.
+for :math:`j = 0, 1, \dots, N_\omega - 1`, where :math:`\Delta t` is
+the *simulation* timestep (``real_dt``), :math:`N \cdot \Delta t = T`
+is the total propagation duration, and
+:math:`w(t) = \tfrac{1}{2}(1 - \cos(2\pi t / T))` is a Hann window
+applied to the integrand inside the C++ accumulator so the dumped
+spectrum is leakage-cleaned at source.
+
+**Streamed loop ordering.** The double sum can be evaluated with
+either index outermost. The standard offline DFT ordering would
+store the full time series and then sweep frequencies::
+
+    for j in 0..N_ω:                       # outer = frequency
+        Fhat[j] = 0
+        for n in 0..N:                     # inner = time
+            Fhat[j] += V(x, n·Δt) · w(n·Δt) · exp(-i ω_j n Δt) · Δt
+
+The same arithmetic with the loops swapped — what ``latom`` does — is::
+
+    for n in 0..N:                         # outer = the sim's time loop
+        for j in 0..N_ω:                   # inner = frequency
+            Fhat[j] += V(x, n·Δt) · w(n·Δt) · exp(-i ω_j n Δt) · Δt
+
+Because the simulation already iterates time step-by-step (Crank–
+Nicolson is intrinsically a time loop), hooking the FFT accumulator
+into that loop is free — at every step, before ``realpot`` is
+discarded, its contribution is added to *every* frequency bin of
+:math:`\hat v_{\rm KS}`. The ``j``-loop is parallelised across
+cores with OpenMP. The total floating-point cost,
+:math:`\mathcal{O}(N \cdot N_\omega \cdot N_x)`, is identical to the
+offline ordering.
+
+The streamed ordering wins on three practical counts:
+
+* **Memory is constant in** :math:`N`. Only the accumulator
+  :math:`\hat V[N_x \times N_\omega]` lives in RAM —
+  :math:`N_x \cdot N_\omega \cdot 16` bytes (≈ 12 MB for the
+  defaults) — *regardless of how many timesteps the simulation runs*.
+  The full time series is never materialised; in the offline
+  ordering it would be :math:`N \cdot N_x` complex doubles (e.g.
+  270 MB for the paper's case 1).
+* **The frequency grid is arbitrary.** ``np.fft.rfft`` produces
+  frequencies :math:`\omega_k = 2\pi k/(N\Delta t)` fixed by the
+  record length. Our :math:`\{\omega_j\}` is whatever we like —
+  uniform between user-set bounds, log-spaced, or densely packed
+  around the harmonics of interest.
+* **No snapshot-cadence aliasing.** The integrand is sampled at the
+  simulation's own timestep :math:`\Delta t`, whose Nyquist
+  :math:`\pi / \Delta t` sits far above any laser frequency of
+  interest (:math:`\sim 31.4` a.u. for :math:`\Delta t = 0.1`).
+  Whether the user asks for periodic disk snapshots or not is
+  immaterial to the FFT.
+
+**Choosing** :math:`N_\omega`. The grid size is a *sampling*
+choice, not a discovery — it does not require knowing where the
+peaks lie. The intrinsic linewidth of any spectral peak is set by
+the simulation duration:
+:math:`\Delta \omega_{\rm Fourier} = 2\pi/T`. Picking the bin
+spacing :math:`d\omega = (\omega_{\max} - \omega_{\min})/
+(N_\omega - 1)` small enough to resolve that linewidth — typically
+:math:`N_\omega \gtrsim k \cdot (\omega_{\max} - \omega_{\min})\,
+T/(2\pi)` with :math:`k \sim 3`–:math:`5` — guarantees every peak
+is sampled by several bins. Increasing :math:`N_\omega` further is
+harmless (just more memory in :math:`\hat V`); reducing it broadens
+the apparent peak shape but does *not* introduce false frequencies
+(the time-domain Nyquist :math:`\pi/\Delta t` is set by the
+simulation step, not by :math:`N_\omega`).
+
+At simulation end the raw power
+:math:`|\hat v_{\rm KS}(x, \omega_j)|^2` is dumped to ``vks_fft.dat``
+for plotting. The Python plotter does *no further FFT* — it just
+reads the file and renders.
+
+
+Spectral projection: the same trick, applied to :math:`\psi(t)`
+---------------------------------------------------------------
+
+The streaming Fourier-projection accumulator is not unique to the
+KS-potential FFT — it is the *same* trick that underlies the
+Feit–Fleck–Steiger spectral method [FleckFeitSteiger1982]_ used by
+the **Autoionization Computer** workflow. The two are dual flavours
+of a single operation, hooked into the same Crank–Nicolson
+real-time loop:
+
+============================ ==================================== =====================================
+Aspect                       FFT of :math:`v_{\rm KS}`            Feit–Fleck–Steiger
+============================ ==================================== =====================================
+Sampled at each step         scalar :math:`v_{\rm KS}(x, t_n)`    full wavefunction :math:`\psi(t_n)`
+Frequencies probed           grid :math:`\{\omega_j\}` of         one target energy
+                             :math:`N_\omega` values              :math:`E_{\rm target}`
+Sign in the kernel           :math:`e^{-i \omega_j t_n}`          :math:`e^{+i E_{\rm target} t_n}`
+Window :math:`w(t)`          Hann                                 Hann
+Output                       spectrum                              normalised eigenstate
+                             :math:`|\hat v_{\rm KS}(x,\omega)|^2` :math:`\phi_{k^*}`
+Cost per timestep            :math:`O(N_x \cdot N_\omega)`         :math:`O(N_x \cdot N_y)`
+============================ ==================================== =====================================
+
+For the Feit–Fleck–Steiger projection, expanding
+:math:`\psi(t) = \sum_k c_k\,e^{-i E_k t}\,\phi_k` in the field-free
+eigenbasis and substituting into
+
+.. math::
+
+   \psi_{\rm proj}(T) = \int_0^T w(t)\, e^{+i E_{\rm target} t}\,
+                              \psi(t)\, dt
+
+selects the term :math:`E_k = E_{\rm target}` in the sum:
+:math:`\psi_{\rm proj}/\|\psi_{\rm proj}\| \to \phi_{k^*}` as
+:math:`T \to \infty`. The Hann window damps neighbouring-eigenstate
+leakage. So extracting an eigenstate at energy :math:`E` and
+dumping a Fourier spectrum at frequencies :math:`\omega` are *the
+same operation* — only what gets weighted (a wavefunction vs a
+scalar observable) and which :math:`\omega`'s are scanned (one vs
+many) differ. ``latom`` implements both as a single pattern
+wrapped around the time loop: multiply the integrand by
+:math:`\exp(\pm i\omega t)\, w(t)\, \Delta t` and add to a running
+accumulator.
+
+Combined with the imaginary-time eigenvalue extraction discussed
+earlier, ``latom`` therefore reuses the *same* Crank–Nicolson
+kernel to do three apparently different things — propagate under a
+laser field, find the lowest eigenstate by contraction, and project
+onto an arbitrary eigenstate by streaming Fourier — each obtained
+by choosing what the time loop multiplies its iterate by.
 
 
 Implementation

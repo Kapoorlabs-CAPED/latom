@@ -42,6 +42,12 @@ class SimulationConfig:
     fft_n_omega: int = 500
     fft_harmonic_min: float = 0.0
     fft_harmonic_max: float = 5.0
+    # Absolute-units overrides for the FFT range (a.u.). When > 0 they
+    # take precedence over the harmonic-multiplier values above. Useful
+    # when scanning V_KS for atomic transition lines (~|E_0|), which
+    # may sit far above 5·ω_L for small-ω lasers.
+    fft_omega_min_au: float = 0.0
+    fft_omega_max_au: float = 0.0
     vks_fft_file: str = "vks_fft.dat"
 
     # Physics parameters

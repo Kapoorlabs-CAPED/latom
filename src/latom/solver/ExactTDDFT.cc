@@ -66,6 +66,12 @@ static double cfg_kick_strength = 0.01;
 static long   cfg_fft_n_omega = 500;
 static double cfg_fft_harmonic_min = 0.0;
 static double cfg_fft_harmonic_max = 5.0;
+// Absolute-units (a.u.) override for the FFT range. When > 0, used in
+// place of harmonic_min/max × omega_L. Useful when V_KS is expected to
+// carry atomic-scale frequencies (~|E_0|) that don't sit at low
+// multiples of the laser frequency.
+static double cfg_fft_omega_min_au = 0.0;
+static double cfg_fft_omega_max_au = 0.0;
 static char   cfg_vks_fft_file[512] = "vks_fft.dat";
 
 static char   cfg_output_dir[512]   = "res";
@@ -121,6 +127,8 @@ static void read_config(const char* filename)
       else if (strcmp(key, "fft_n_omega") == 0)     cfg_fft_n_omega = atol(value);
       else if (strcmp(key, "fft_harmonic_min") == 0) cfg_fft_harmonic_min = atof(value);
       else if (strcmp(key, "fft_harmonic_max") == 0) cfg_fft_harmonic_max = atof(value);
+      else if (strcmp(key, "fft_omega_min_au") == 0) cfg_fft_omega_min_au = atof(value);
+      else if (strcmp(key, "fft_omega_max_au") == 0) cfg_fft_omega_max_au = atof(value);
       else if (strcmp(key, "vks_fft_file") == 0)    snprintf(cfg_vks_fft_file, sizeof(cfg_vks_fft_file), "%s", value);
       else if (strcmp(key, "output_dir") == 0)      snprintf(cfg_output_dir, sizeof(cfg_output_dir), "%s", value);
       else if (strcmp(key, "obser_file") == 0)      snprintf(cfg_obser_file, sizeof(cfg_obser_file), "%s", value);
@@ -395,8 +403,14 @@ int main(int argc, char **argv)
   // 16 · N_x · N_ω bytes (≈ 12 MB for the defaults).
   long n_omega = (cfg_fft_n_omega > 1) ? cfg_fft_n_omega : 1;
   double omega_L_fft = cfg_laser_freq;
-  double omega_min_fft = cfg_fft_harmonic_min * omega_L_fft;
-  double omega_max_fft = cfg_fft_harmonic_max * omega_L_fft;
+  // Absolute-units overrides (a.u.) take precedence when set; otherwise
+  // the range is harmonic_min/max × ω_L.
+  double omega_min_fft = (cfg_fft_omega_min_au > 0.0)
+      ? cfg_fft_omega_min_au
+      : cfg_fft_harmonic_min * omega_L_fft;
+  double omega_max_fft = (cfg_fft_omega_max_au > 0.0)
+      ? cfg_fft_omega_max_au
+      : cfg_fft_harmonic_max * omega_L_fft;
   double dom_fft = (n_omega > 1)
       ? (omega_max_fft - omega_min_fft) / (double)(n_omega - 1)
       : 0.0;
